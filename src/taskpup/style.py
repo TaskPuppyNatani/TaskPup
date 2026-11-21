@@ -45,6 +45,12 @@ def apply_style(app: QApplication) -> None:
         QLabel#performanceTitle { color: #f7f2ff; font-size: 22px; font-weight: 700; }
         QLabel#performanceMuted { color: #bcb2c9; font-size: 12px; }
         QLabel#performanceValue { color: #f0eaf7; font-size: 15px; font-weight: 600; }
+        QLabel#serviceDetailValue { color: #f0eaf7; font-size: 13px; font-weight: 500; }
+        QFrame#serviceNotice { background: #2b2131; border: 1px solid #7a4e68; border-radius: 6px; }
+        QLabel#serviceNoticeText { color: #f6e7f2; font-size: 12px; }
+        QScrollArea#serviceDetailsScroll, QWidget#serviceDetailsContent { background: transparent; }
+        QSplitter::handle { background: #312a3d; width: 4px; }
+        QSplitter::handle:hover { background: #765989; }
         QLabel#resourceName { color: #f1eef7; font-size: 14px; font-weight: 700; }
         QFrame#logicalCpu { background: #24202d; border: 1px solid #3a3048; border-radius: 4px; }
         QFrame#metric { background: #222029; border: 1px solid #373142; border-radius: 8px; }

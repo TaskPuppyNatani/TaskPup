@@ -10,6 +10,7 @@ from PySide6.QtCore import QObject, QTimer, Signal, Slot
 from taskpup.metrics import SystemSample, SystemSampler
 from taskpup.platform import desktop_icons
 from taskpup.processes import Resources, Sampler, Snapshot
+from taskpup.services import ServicesSnapshot, discover_services
 
 
 @dataclass(slots=True)
@@ -22,27 +23,44 @@ class RefreshResult:
     performance_error: str | None = None
 
 
+@dataclass(slots=True)
+class ServicesRefreshResult:
+    generation: int
+    snapshot: ServicesSnapshot | None = None
+    error: str | None = None
+
+
 class RefreshController(QObject):
     ready = Signal(object)
     icons_ready = Signal(object)
     failed = Signal(str)
     performance_ready = Signal(object)
     performance_failed = Signal(str)
+    services_ready = Signal(object)
+    services_failed = Signal(str)
 
     def __init__(
         self, parent: QObject, sample: Callable[[Event], Snapshot] | None = None,
         system: SystemSampler | None = None,
+        services: Callable[[Event], ServicesSnapshot] | None = None,
     ) -> None:
         super().__init__(parent)
         self.sample = sample
         self.system = system if system is not None else SystemSampler()
+        self.services_loader = services if services is not None else discover_services
         self.processes = Sampler(self.system)
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="taskpup-sampler")
+        self.services_executor: ThreadPoolExecutor | None = None
         self.stop_requested = Event()
         self.future: Future[RefreshResult] | None = None
+        self.services_future: Future[ServicesRefreshResult] | None = None
+        self.services_run_stop: Event | None = None
         self.load_icons = True
         self.process_pending = self.performance_pending = False
         self.process_active = self.performance_active = False
+        self.services_pending = False
+        self.services_generation = 0
+        self.services_applied_generation = 0
         self.monitoring = False
         self.epoch = 0
         # Used only on the worker. Epoch changes invalidate old CPU and swap intervals.
@@ -141,30 +159,87 @@ class RefreshController(QObject):
         return result
 
     @Slot()
-    def collect(self) -> None:
-        if self.future is None or not self.future.done() or self.stop_requested.is_set():
+    def request_services(self) -> None:
+        if self.stop_requested.is_set():
             return
-        future, self.future = self.future, None
-        self.process_active = self.performance_active = False
-        self.poll.stop()
-        result = future.result()
-        if result.icons is not None:
-            self.load_icons = False
-            self.icons_ready.emit(result.icons)
-        if result.snapshot is not None:
-            self.ready.emit(result.snapshot)
-        if result.process_error is not None:
-            self.failed.emit(result.process_error)
-        if result.epoch == self.epoch and self.monitoring:
-            if result.system is not None:
-                self.performance_ready.emit(result.system)
-            elif result.performance_error is not None:
-                self.performance_failed.emit(result.performance_error)
-        self.submit()
+        self.services_generation += 1
+        self.services_pending = True
+        if self.services_run_stop is not None:
+            self.services_run_stop.set()
+        self.submit_services()
+
+    def submit_services(self) -> None:
+        if self.services_future is not None or not self.services_pending or self.stop_requested.is_set():
+            return
+        self.services_pending = False
+        if self.services_executor is None:
+            self.services_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="taskpup-services")
+        generation = self.services_generation
+        run_stop = Event()
+        self.services_run_stop = run_stop
+        self.services_future = self.services_executor.submit(self.collect_services_sample, generation, run_stop)
+        self.poll.start()
+
+    def collect_services_sample(self, generation: int, run_stop: Event) -> ServicesRefreshResult:
+        if self.stop_requested.is_set() or run_stop.is_set():
+            return ServicesRefreshResult(generation)
+        try:
+            snapshot = self.services_loader(run_stop)
+        except Exception as error:
+            return ServicesRefreshResult(generation, error=str(error))
+        if self.stop_requested.is_set() or run_stop.is_set():
+            return ServicesRefreshResult(generation)
+        return ServicesRefreshResult(generation, snapshot=snapshot)
+
+    @Slot()
+    def collect(self) -> None:
+        if self.stop_requested.is_set():
+            self.poll.stop()
+            return
+        if self.future is not None and self.future.done():
+            future, self.future = self.future, None
+            self.process_active = self.performance_active = False
+            result = future.result()
+            if result.icons is not None:
+                self.load_icons = False
+                self.icons_ready.emit(result.icons)
+            if result.snapshot is not None:
+                self.ready.emit(result.snapshot)
+            if result.process_error is not None:
+                self.failed.emit(result.process_error)
+            if result.epoch == self.epoch and self.monitoring:
+                if result.system is not None:
+                    self.performance_ready.emit(result.system)
+                elif result.performance_error is not None:
+                    self.performance_failed.emit(result.performance_error)
+            self.submit()
+        if not self.stop_requested.is_set() and self.services_future is not None and self.services_future.done():
+            services_future, self.services_future = self.services_future, None
+            self.services_run_stop = None
+            services_result = services_future.result()
+            if (
+                not self.stop_requested.is_set()
+                and services_result.generation == self.services_generation
+                and services_result.generation > self.services_applied_generation
+            ):
+                if services_result.snapshot is not None:
+                    self.services_applied_generation = services_result.generation
+                    self.services_ready.emit(services_result.snapshot)
+                elif services_result.error is not None:
+                    self.services_applied_generation = services_result.generation
+                    self.services_failed.emit(services_result.error)
+            self.submit_services()
+        if self.stop_requested.is_set() or (self.future is None and self.services_future is None):
+            self.poll.stop()
 
     def stop(self) -> None:
         self.stop_requested.set()
+        if self.services_run_stop is not None:
+            self.services_run_stop.set()
+        self.services_pending = False
         self.interval.stop()
         self.performance_interval.stop()
         self.poll.stop()
         self.executor.shutdown(wait=False, cancel_futures=True)
+        if self.services_executor is not None:
+            self.services_executor.shutdown(wait=False, cancel_futures=True)

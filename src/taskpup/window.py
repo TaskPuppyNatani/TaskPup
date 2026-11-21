@@ -20,6 +20,8 @@ from taskpup.platform import logo_path, open_executable_location, start_task
 from taskpup.processes import Identity, ProcessRow, Resources, Snapshot
 from taskpup.refresh import RefreshController
 from taskpup.report_dialog import ReportDialog
+from taskpup.services import ServicesSnapshot
+from taskpup.services_view import ServicesPage
 from taskpup.settings import Settings
 
 
@@ -116,14 +118,17 @@ class MainWindow(QMainWindow):
         self.navigation.setUsesScrollButtons(False)
         self.navigation.addTab("Processes")
         self.navigation.addTab("Performance")
+        self.navigation.addTab("Services")
         layout.addWidget(self.navigation, alignment=Qt.AlignmentFlag.AlignLeft)
-        pages = QStackedWidget()
+        self.pages = QStackedWidget()
         processes = QWidget()
         self.performance = PerformanceDashboard(self.settings)
-        pages.addWidget(processes)
-        pages.addWidget(self.performance)
-        self.navigation.currentChanged.connect(pages.setCurrentIndex)
-        layout.addWidget(pages, 1)
+        self.services = ServicesPage()
+        self.pages.addWidget(processes)
+        self.pages.addWidget(self.performance)
+        self.pages.addWidget(self.services)
+        self.navigation.currentChanged.connect(self.on_navigation_changed)
+        layout.addWidget(self.pages, 1)
 
         layout = QVBoxLayout(processes)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -221,7 +226,7 @@ class MainWindow(QMainWindow):
         self.auto.toggled.connect(self.set_auto)
         self.add_shortcut("Ctrl+N", self.run_task)
         self.add_shortcut("Ctrl+F", self.focus_search)
-        self.add_shortcut("F5", self.refresh.manual)
+        self.add_shortcut("F5", self.refresh_current_view)
         self.add_shortcut("Alt+Return", self.process_properties_shortcut)
 
         self.refresh.ready.connect(self.apply_snapshot)
@@ -229,7 +234,10 @@ class MainWindow(QMainWindow):
         self.refresh.failed.connect(self.refresh_failed)
         self.refresh.performance_ready.connect(self.apply_performance)
         self.refresh.performance_failed.connect(self.performance.record_failure)
+        self.refresh.services_ready.connect(self.apply_services)
+        self.refresh.services_failed.connect(self.services_failed)
         self.performance.monitoring_changed.connect(self.refresh.set_performance)
+        self.services.refresh_requested.connect(self.refresh.request_services)
         self.set_auto(self.auto.isChecked())
         self.statusBar().showMessage("Reading processes…")
         self.redraw()
@@ -242,13 +250,33 @@ class MainWindow(QMainWindow):
         action.triggered.connect(callback)
         self.addAction(action)
 
+    def on_navigation_changed(self, index: int) -> None:
+        self.pages.setCurrentIndex(index)
+        if index == 2:
+            self.services.ensure_loaded()
+
     def export_report(self) -> None:
         ReportDialog(self).exec()
 
     def focus_search(self) -> None:
+        if self.navigation.currentIndex() == 2:
+            self.services.focus_search()
+            return
         self.navigation.setCurrentIndex(0)
         self.search.setFocus()
         self.search.selectAll()
+
+    def refresh_current_view(self) -> None:
+        if self.navigation.currentIndex() == 2:
+            self.services.request_refresh()
+            return
+        self.refresh.manual()
+
+    def apply_services(self, snapshot: ServicesSnapshot) -> None:
+        self.services.apply_snapshot(snapshot)
+
+    def services_failed(self, error: str) -> None:
+        self.services.apply_error(error)
 
     def process_properties_shortcut(self) -> None:
         if self.navigation.currentIndex() == 0:
