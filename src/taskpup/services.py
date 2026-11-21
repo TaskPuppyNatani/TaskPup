@@ -16,6 +16,7 @@ ScopeFilter = Literal["all", "system", "user"]
 StateCategory = Literal["running", "active_other", "inactive", "failed", "transitioning", "other", "unknown"]
 
 DEFAULT_TIMEOUT = 8.0
+SHOW_BATCH_SIZE = 100
 UNAVAILABLE = "Unavailable"
 
 SHOW_PROPERTIES = (
@@ -380,10 +381,49 @@ def _parse_list(value: str | None) -> tuple[str, ...]:
     return tuple(text.split()) if text is not None else ()
 
 
+def parse_list_units_json(text: str) -> list[LoadedServiceEntry]:
+    """Parse `systemctl list-units --type=service --all --output=json` output."""
+    stripped = text.strip()
+    if not stripped:
+        raise MalformedOutputError("Empty output from list-units.")
+    try:
+        payload = json.loads(stripped)
+    except json.JSONDecodeError as error:
+        raise MalformedOutputError(f"Invalid JSON from list-units: {error.msg}") from error
+    if not isinstance(payload, list):
+        raise MalformedOutputError("Expected a JSON list from list-units.")
+    entries: list[LoadedServiceEntry] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            raise MalformedOutputError("Expected JSON objects inside list-units output.")
+        raw_unit = item.get("unit")
+        if not isinstance(raw_unit, str) or not raw_unit.strip():
+            raise MalformedOutputError("Loaded unit entry is missing a valid unit name.")
+        unit = raw_unit.strip()
+        if not unit.endswith(".service"):
+            continue
+        parsed_fields: dict[str, str | None] = {}
+        for key in ("load", "active", "sub", "description"):
+            value = item.get(key)
+            if value is not None and not isinstance(value, str):
+                raise MalformedOutputError(f"Invalid {key} value for unit {unit}.")
+            parsed_fields[key] = _clean_str(value)
+        entries.append(
+            LoadedServiceEntry(
+                unit=unit,
+                description=parsed_fields["description"],
+                load_state=parsed_fields["load"],
+                active_state=parsed_fields["active"],
+                sub_state=parsed_fields["sub"],
+            )
+        )
+    return entries
+
+
 def parse_show_output(text: str) -> list[LoadedServiceEntry]:
-    """Parse `systemctl show --type=service --all` key=value output."""
+    """Parse `systemctl show -- <unit...>` key=value output for explicit service units."""
     if not text.strip():
-        return []
+        raise MalformedOutputError("Empty output from systemctl show.")
     entries: list[LoadedServiceEntry] = []
     block: dict[str, str] = {}
 
@@ -435,7 +475,7 @@ def parse_unit_files_json(text: str) -> list[UnitFileEntry]:
     """Parse `systemctl list-unit-files --type=service --output=json` output."""
     stripped = text.strip()
     if not stripped:
-        return []
+        raise MalformedOutputError("Empty output from list-unit-files.")
     try:
         payload = json.loads(stripped)
     except json.JSONDecodeError as error:
@@ -684,6 +724,32 @@ def _base_command(scope: ServiceScope) -> tuple[str, ...]:
     return ("systemctl",) if scope == "system" else ("systemctl", "--user")
 
 
+def _merge_loaded_metadata(
+    base_entry: LoadedServiceEntry,
+    detail: LoadedServiceEntry | None,
+) -> LoadedServiceEntry:
+    if detail is None:
+        return base_entry
+    return LoadedServiceEntry(
+        unit=base_entry.unit,
+        description=detail.description or base_entry.description,
+        load_state=base_entry.load_state or detail.load_state,
+        active_state=base_entry.active_state or detail.active_state,
+        sub_state=base_entry.sub_state or detail.sub_state,
+        unit_file_state=detail.unit_file_state or base_entry.unit_file_state,
+        unit_file_preset=detail.unit_file_preset or base_entry.unit_file_preset,
+        fragment_path=detail.fragment_path,
+        main_pid=detail.main_pid,
+        service_type=detail.service_type,
+        user=detail.user,
+        transient=detail.transient,
+        result=detail.result,
+        active_enter_timestamp=detail.active_enter_timestamp,
+        status_text=detail.status_text,
+        triggered_by=detail.triggered_by,
+    )
+
+
 def discover_scope(
     scope: ServiceScope,
     *,
@@ -693,30 +759,30 @@ def discover_scope(
 ) -> tuple[tuple[ServiceRecord, ...], ScopeStatus]:
     """Discover loaded services and installed unit files for one systemd scope."""
     base = _base_command(scope)
-    show_cmd = (
+    list_units_cmd = (
         *base,
-        "show",
+        "list-units",
         "--type=service",
         "--all",
+        "--output=json",
         "--no-pager",
-        "-p",
-        ",".join(SHOW_PROPERTIES),
+        "--no-legend",
     )
-    show_result = runner(show_cmd, timeout, stop)
-    if show_result.cancelled:
+    units_result = runner(list_units_cmd, timeout, stop)
+    if units_result.cancelled:
         return (), ScopeStatus(scope=scope, available=False, unit_files_available=False, error=None)
-    if show_result.timed_out or show_result.os_error or show_result.returncode != 0:
+    if units_result.timed_out or units_result.os_error or units_result.returncode != 0:
         return (
             (),
             ScopeStatus(
                 scope=scope,
                 available=False,
                 unit_files_available=False,
-                error=_format_command_error(scope, "service query", show_result),
+                error=_format_command_error(scope, "service query", units_result),
             ),
         )
     try:
-        loaded_entries = parse_show_output(show_result.stdout)
+        loaded_entries = parse_list_units_json(units_result.stdout)
     except MalformedOutputError as error:
         return (
             (),
@@ -728,6 +794,43 @@ def discover_scope(
             ),
         )
 
+    warnings: list[str] = []
+    enriched_by_unit: dict[str, LoadedServiceEntry] = {}
+    if loaded_entries:
+        unit_names = list(dict.fromkeys(entry.unit for entry in loaded_entries))
+        for start in range(0, len(unit_names), SHOW_BATCH_SIZE):
+            batch_units = unit_names[start : start + SHOW_BATCH_SIZE]
+            show_cmd = (
+                *base,
+                "show",
+                "--no-pager",
+                "-p",
+                ",".join(SHOW_PROPERTIES),
+                "--",
+                *batch_units,
+            )
+            show_result = runner(show_cmd, timeout, stop)
+            if show_result.cancelled:
+                return (), ScopeStatus(scope=scope, available=False, unit_files_available=False, error=None)
+            if show_result.timed_out or show_result.os_error or show_result.returncode != 0:
+                warnings.append(_format_command_error(scope, "service metadata query", show_result))
+                break
+            try:
+                batch_entries = parse_show_output(show_result.stdout)
+            except MalformedOutputError as error:
+                warnings.append(f"{SCOPE_LABELS[scope]} service metadata query returned malformed output: {error}")
+                break
+            if not batch_entries:
+                warnings.append(
+                    f"{SCOPE_LABELS[scope]} service metadata query returned malformed output: "
+                    "no service entries matched requested units."
+                )
+                break
+            for item in batch_entries:
+                enriched_by_unit[item.unit] = item
+
+    merged_loaded = [_merge_loaded_metadata(entry, enriched_by_unit.get(entry.unit)) for entry in loaded_entries]
+
     unit_files_cmd = (*base, "list-unit-files", "--type=service", "--output=json", "--no-pager", "--no-legend")
     files_result = runner(unit_files_cmd, timeout, stop)
     if files_result.cancelled:
@@ -735,23 +838,22 @@ def discover_scope(
 
     unit_file_entries: list[UnitFileEntry] = []
     unit_files_available = True
-    warning: str | None = None
     if files_result.timed_out or files_result.os_error or files_result.returncode != 0:
         unit_files_available = False
-        warning = _format_command_error(scope, "unit-file query", files_result)
+        warnings.append(_format_command_error(scope, "unit-file query", files_result))
     else:
         try:
             unit_file_entries = parse_unit_files_json(files_result.stdout)
         except MalformedOutputError as error:
             unit_files_available = False
-            warning = f"{SCOPE_LABELS[scope]} unit-file query returned malformed output: {error}"
+            warnings.append(f"{SCOPE_LABELS[scope]} unit-file query returned malformed output: {error}")
 
-    records = merge_scope_services(scope, loaded_entries, unit_file_entries)
+    records = merge_scope_services(scope, merged_loaded, unit_file_entries)
     status = ScopeStatus(
         scope=scope,
         available=True,
         unit_files_available=unit_files_available,
-        error=warning,
+        error="\n".join(warnings) if warnings else None,
     )
     return records, status
 
