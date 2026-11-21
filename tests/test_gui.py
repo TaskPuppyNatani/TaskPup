@@ -15,6 +15,7 @@ from PySide6.QtWidgets import QApplication, QLabel, QPushButton
 
 from taskpup import app, dialogs, management
 from taskpup.metrics import MemorySample, SwapSample, SystemSample, SystemSampler
+from taskpup.gpu import GpuSample
 from taskpup.model import ProcessModel
 from taskpup.platform import start_task
 from taskpup.processes import Identity, ProcessRow, ProcStat, Resources, Snapshot
@@ -131,6 +132,79 @@ def test_performance_pause_and_settings_survive_reopening(window: MainWindow) ->
         assert reopened.refresh.interval.isActive()
     finally:
         reopened.close()
+
+
+def test_gpu_navigation_history_and_missing_samples(window: MainWindow) -> None:
+    window.refresh.stop()
+    page = window.performance
+    gpu = GpuSample('/pci/one', 'Example GPU', 'amdgpu', 20, 20, 100, 4, 200, {})
+    second = replace(gpu, identity='/pci/two', name='Other GPU', utilization=None)
+    window.navigation.setCurrentIndex(1)
+    page.record_sample(replace(system_reading(), gpus=(gpu, second)))
+    QApplication.processEvents()
+    card = page.cards[3]
+    assert card.height() >= 155
+    assert card.rect().contains(card.graph.geometry())
+    assert card.info.height() >= card.info.fontMetrics().height() * 2
+    page.cards[3].click()
+    assert page.details.currentIndex() == 3
+    view = page.gpu_views[gpu.identity]
+    assert view.usage.samples[-1][1] == 20
+    assert view.memory.samples[-1][1] == 20
+    assert view.stats.values["gtt_used"].accessibleName() == "GTT allocated"
+    assert "may be system memory" in view.stats.cells["memory_total"].toolTip()
+    page.cards[0].click()
+    page.record_sample(replace(system_reading(), gpus=(second,)))
+    assert view.usage.samples[-1][1] is None
+    page.cards[3].click()
+    assert view.stats.values["utilization"].text() == "Unavailable"
+    page.pause.click()
+    assert page.gpu_views[second.identity].memory.samples[-1][1] is None
+
+
+def test_gpu_display_adapts_to_device_capabilities(window: MainWindow) -> None:
+    window.refresh.stop()
+    page = window.performance
+    window.navigation.setCurrentIndex(1)
+    full = GpuSample("/pci/full", "Full GPU", "amdgpu", 0, 0, 1024**3, 0, 1024**3, {
+        "GPU temperature": 44, "Hotspot temperature": 51, "Memory temperature": 46,
+        "Core clock": 300, "Memory clock": 200, "Power": 33, "Power limit": 100, "Fan": 0,
+    })
+    partial = GpuSample("/pci/partial", "Partial GPU", "amdgpu", None, 0, None, None, None, {},
+                        frozenset({"Core clock", "utilization"}))
+    empty = GpuSample("/pci/empty", "Other GPU", "radeon", None, None, None, None, None, {})
+    page.record_sample(replace(system_reading(), gpus=(full, partial, empty)))
+    full_view, partial_view, empty_view = (page.gpu_views[gpu.identity] for gpu in (full, partial, empty))
+
+    page.cards[3].click()
+    QApplication.processEvents()
+    assert len(full_view.stats.values) == 13
+    assert full_view.stats.values["utilization"].text() == "0.0%"
+    assert full_view.stats.values["Fan"].text() == "0.0 RPM"
+    assert full_view.memory.samples[-1][1] == 0.0
+    assert full_view.footer.isHidden() and all(chart.isVisible() for chart, _ in full_view.plots)
+
+    page.cards[4].click()
+    QApplication.processEvents()
+    values = partial_view.stats.values.copy()
+    assert set(values) == {"Core clock", "utilization", "memory_used"}
+    assert values["Core clock"].text() == "Unavailable"
+    assert values["memory_used"].text() == "0 B"
+    assert partial_view.plots[0][0].isVisible() and partial_view.plots[1][0].isHidden()
+    assert partial_view.footer.isVisible() and "Linux driver" in partial_view.footer.toolTip()
+    page.record_sample(replace(system_reading(), gpus=(replace(partial, utilization=0, sensors={"Core clock": 300}),)))
+    assert partial_view.stats.values == values
+    assert values["Core clock"].text() == "300.0 MHz"
+    page.record_failure("temporary failure")
+    assert partial_view.stats.values == values
+    assert all(value.text() == "Unavailable" for value in values.values())
+    assert partial_view.plots[0][0].isVisible() and partial_view.usage.samples[-1][1] is None
+
+    page.cards[5].click()
+    assert empty_view.stats.isHidden()
+    assert empty_view.card.graph.isHidden()
+    assert all(chart.isHidden() for chart, _ in empty_view.plots)
+    assert "No telemetry" in empty_view.footer.text()
 
 
 def test_worker_discards_inflight_reading_on_pause_and_resumes(qt_app: QApplication) -> None:

@@ -61,3 +61,25 @@ def test_history_graph_uses_latest_sample_when_now_is_missing(qt_app: QApplicati
     assert graph._now == 5.0
     assert graph._y_labels() == ("100%", "50%", "0%")
 
+
+def test_percentage_plot_places_high_values_above_low_values(qt_app: QApplication) -> None:
+    graph = HistoryGraph("#ff00ff", fill=False)
+    graph.resize(300, 160)
+    graph.set_series(((0.1, 75), (0.9, 75)), now=1, duration=1)
+    image = QImage(graph.size(), QImage.Format.Format_ARGB32)
+    graph.render(image)
+    plot = graph._plot_rect()
+    x = round(plot.center().x())
+    high = round(plot.bottom() - 0.75 * plot.height())
+    low = round(plot.bottom() - 0.25 * plot.height())
+
+    def purple_at(y: int) -> bool:
+        return any(
+            image.pixelColor(x, row).red() > 170 and image.pixelColor(x, row).blue() > 170
+            and image.pixelColor(x, row).green() < 100
+            for row in range(y - 2, y + 3)
+        )
+
+    assert graph._y_labels() == ("100%", "50%", "0%")
+    assert high < low and purple_at(high) and not purple_at(low)
+

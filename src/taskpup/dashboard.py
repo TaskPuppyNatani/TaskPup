@@ -1,9 +1,10 @@
 """Performance pages and their in-memory monitoring history."""
 
+from dataclasses import dataclass, field
 import time
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QShowEvent
+from PySide6.QtGui import QResizeEvent, QShowEvent
 from PySide6.QtWidgets import (
     QButtonGroup, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton,
     QScrollArea, QStackedWidget, QVBoxLayout, QWidget,
@@ -11,6 +12,7 @@ from PySide6.QtWidgets import (
 
 from taskpup.graphs import History, HistoryGraph
 from taskpup.metrics import SystemSample
+from taskpup.gpu import GpuSample
 from taskpup.model import memory_text
 from taskpup.settings import Settings
 
@@ -24,6 +26,28 @@ STATS = (
     ("Utilization", "Total", "Used", "Available", "Swap in", "Swap out"),
 )
 UNAVAILABLE = "Unavailable"
+GPU_SENSOR_UNITS = {
+    "GPU temperature": "°C", "Hotspot temperature": "°C", "Memory temperature": "°C",
+    "Core clock": "MHz", "Memory clock": "MHz", "Power": "W", "Power limit": "W", "Fan": "RPM",
+}
+GPU_STAT_NAMES = {
+    "utilization": "Utilization",
+    "memory_used": "GPU memory used",
+    "memory_total": "GPU memory pool",
+    "gtt_used": "GTT allocated",
+    "gtt_total": "GTT limit",
+    **{key: key for key in GPU_SENSOR_UNITS},
+}
+GPU_MEMORY_KEYS = {"memory_used", "memory_total"}
+GPU_MEMORY_TOOLTIP = "The driver-reported GPU memory pool may be system memory on integrated GPUs."
+GTT_TOOLTIP = "GTT is tracked separately by the driver. Its limit does not measure system RAM consumption."
+GPU_STAT_TOOLTIPS = {
+    "memory_used": GPU_MEMORY_TOOLTIP,
+    "memory_total": GPU_MEMORY_TOOLTIP,
+    "gtt_used": GTT_TOOLTIP,
+    "gtt_total": GTT_TOOLTIP,
+    "Power": "The driver reading can include CPU power on APUs.",
+}
 
 
 def percent(value: float | None) -> str:
@@ -81,6 +105,66 @@ class ResourceCard(QPushButton):
         self.setAccessibleDescription(f"{percent(value)}. {info}")
 
 
+class _GpuStatistics(QWidget):
+    def __init__(self) -> None:
+        super().__init__()
+        self.grid = QGridLayout(self)
+        self.grid.setContentsMargins(0, 0, 0, 0)
+        self.grid.setHorizontalSpacing(12)
+        self.grid.setVerticalSpacing(10)
+        self.cells: dict[str, QWidget] = {}
+        self.values: dict[str, QLabel] = {}
+        self.columns = 0
+
+    def display(self, readings: dict[str, str]) -> None:
+        if readings.keys() != self.cells.keys():
+            for key in readings.keys() - self.cells.keys():
+                cell = QWidget(self)
+                layout = QVBoxLayout(cell)
+                layout.setContentsMargins(0, 0, 0, 0)
+                layout.setSpacing(4)
+                caption = QLabel(GPU_STAT_NAMES[key])
+                caption.setObjectName("performanceMuted")
+                caption.setWordWrap(True)
+                value = QLabel()
+                value.setObjectName("performanceValue")
+                value.setAccessibleName(GPU_STAT_NAMES[key])
+                cell.setToolTip(GPU_STAT_TOOLTIPS.get(key, ""))
+                layout.addWidget(caption)
+                layout.addWidget(value)
+                self.cells[key] = cell
+                self.values[key] = value
+            self.reflow()
+        for key, reading in readings.items():
+            self.values[key].setText(reading)
+        self.setVisible(bool(readings))
+
+    def reflow(self) -> None:
+        self.columns = min(4, max(1, (self.width() + 12) // 152))
+        for column in range(4):
+            self.grid.setColumnStretch(column, int(column < self.columns))
+        for position, key in enumerate(key for key in GPU_STAT_NAMES if key in self.cells):
+            self.grid.addWidget(self.cells[key], *divmod(position, self.columns))
+            self.cells[key].show()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        if self.columns != min(4, max(1, (self.width() + 12) // 152)):
+            self.reflow()
+
+
+@dataclass(slots=True)
+class _GpuView:
+    card: ResourceCard
+    name: str
+    plots: list[tuple[QWidget, HistoryGraph]]
+    stats: _GpuStatistics
+    footer: QLabel
+    usage: History = field(default_factory=History)
+    memory: History = field(default_factory=History)
+    capabilities: set[str] = field(default_factory=set)
+
+
 class PerformanceDashboard(QWidget):
     monitoring_changed = Signal(int, bool)
 
@@ -89,6 +173,7 @@ class PerformanceDashboard(QWidget):
         self.settings = settings
         self.histories = tuple(History() for _ in NAMES)
         self.logical_histories: dict[int, History] = {}
+        self.gpu_views: dict[str, _GpuView] = {}
         self.latest: SystemSample | None = None
         self.anchor: float | None = None
         self.processes: int | None = None
@@ -119,19 +204,24 @@ class PerformanceDashboard(QWidget):
 
         body = QHBoxLayout()
         body.setSpacing(12)
+        sidebar_scroll = QScrollArea()
+        sidebar_scroll.setWidgetResizable(True)
+        sidebar_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        sidebar_scroll.setFixedWidth(205)
         sidebar = QWidget()
-        sidebar.setFixedWidth(190)
+        sidebar_scroll.setWidget(sidebar)
         resources = QVBoxLayout(sidebar)
         resources.setContentsMargins(0, 0, 0, 0)
         resources.setSpacing(8)
-        group = QButtonGroup(self)
+        group = self.group = QButtonGroup(self)
+        self.resources = resources
         self.cards = [ResourceCard(name, color) for name, color in zip(NAMES, COLORS, strict=True)]
         for index, card in enumerate(self.cards):
             group.addButton(card, index)
             resources.addWidget(card)
         self.cards[self.resource].setChecked(True)
         resources.addStretch()
-        body.addWidget(sidebar)
+        body.addWidget(sidebar_scroll)
 
         self.details = QStackedWidget()
         self.plots: list[HistoryGraph] = []
@@ -261,7 +351,7 @@ class PerformanceDashboard(QWidget):
     def save(self) -> None:
         self.settings.save_performance(
             duration=self.duration, interval=self.interval, paused=self.pause.isChecked(),
-            resource=self.resource, logical=self.logical_mode.isChecked(),
+            resource=self.resource if self.resource < 3 else 0, logical=self.logical_mode.isChecked(),
         )
 
     def select_resource(self, resource: int) -> None:
@@ -270,7 +360,8 @@ class PerformanceDashboard(QWidget):
         self.update_charts()
 
     def mark_gap(self, timestamp: float) -> None:
-        for history in (*self.histories, *self.logical_histories.values()):
+        for history in (*self.histories, *self.logical_histories.values(),
+                        *(history for view in self.gpu_views.values() for history in (view.usage, view.memory))):
             history.append(timestamp, None)
 
     def record_failure(self, error: str) -> None:
@@ -296,6 +387,20 @@ class PerformanceDashboard(QWidget):
         )
         for history, value in zip(self.histories, values, strict=True):
             history.append(sample.timestamp, value)
+        current = {gpu.identity: gpu for gpu in sample.gpus}
+        for gpu in sample.gpus:
+            if gpu.identity not in self.gpu_views:
+                self.add_gpu(gpu)
+        for identity, view in self.gpu_views.items():
+            gpu = current.get(identity)
+            if gpu is not None:
+                view.capabilities.update(gpu.capabilities, gpu.sensors)
+                view.capabilities.update(
+                    key for key in ("utilization", "memory_used", "memory_total", "gtt_used", "gtt_total")
+                    if getattr(gpu, key) is not None
+                )
+            view.usage.append(sample.timestamp, gpu.utilization if gpu else None)
+            view.memory.append(sample.timestamp, gpu.memory_percent if gpu else None)
         if sample.logical_percent:
             for cpu in self.logical_histories.keys() - sample.logical_percent.keys():
                 del self.logical_histories[cpu]
@@ -331,12 +436,17 @@ class PerformanceDashboard(QWidget):
             (memory.percent, f"{capacity(memory.used)} / {capacity(memory.total)}") if memory is not None else (None, "Memory data unavailable"),
             (swap.percent if swap is not None else None, swap_info),
         )
-        for card, history, (value, info) in zip(self.cards, self.histories, cards, strict=True):
+        for card, history, (value, info) in zip(self.cards[:3], self.histories, cards, strict=True):
             card.display(value, info)
             card.graph.set_series(history.samples, self.anchor, self.duration)
 
         self.cpu_charts.setCurrentIndex(int(self.logical_mode.isChecked()))
         index = self.resource
+        gpu_samples = {gpu.identity: gpu for gpu in sample.gpus} if sample else {}
+        for identity, view in self.gpu_views.items():
+            self.update_gpu(view, gpu_samples.get(identity))
+        if index >= 3:
+            return
         if index == 0 and self.logical_mode.isChecked():
             self.render_logical_cpus()
         else:
@@ -366,6 +476,92 @@ class PerformanceDashboard(QWidget):
             )
         for label, value in zip(self.statistics[index].values(), values, strict=True):
             label.setText(value)
+
+    def add_gpu(self, gpu: GpuSample) -> None:
+        index = len(self.cards)
+        card = ResourceCard(f'GPU {index - 3}', COLORS[0])
+        card.setStyleSheet('QPushButton#resourceCard { min-height: 155px; }')
+        card.info.setWordWrap(True)
+        card.info.setTextFormat(Qt.TextFormat.PlainText)
+        self.cards.append(card)
+        self.group.addButton(card, index)
+        self.resources.insertWidget(self.resources.count() - 1, card)
+        panel = QFrame()
+        panel.setObjectName('performancePanel')
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(13, 10, 13, 11)
+        layout.setSpacing(7)
+        title = QLabel(f'GPU {index - 3}  ·  {gpu.name}')
+        title.setTextFormat(Qt.TextFormat.PlainText)
+        title.setWordWrap(True)
+        title.setObjectName('performanceTitle')
+        layout.addWidget(title)
+        subtitle = QLabel(f'Driver: {gpu.driver}  ·  {gpu.identity}')
+        subtitle.setObjectName('performanceMuted')
+        subtitle.setTextFormat(Qt.TextFormat.PlainText)
+        subtitle.setWordWrap(True)
+        layout.addWidget(subtitle)
+        plots = []
+        for name, color in (('GPU utilization', COLORS[0]), ('Driver GPU memory pool', COLORS[1])):
+            chart = QWidget()
+            chart_layout = QVBoxLayout(chart)
+            chart_layout.setContentsMargins(0, 0, 0, 0)
+            chart_layout.setSpacing(4)
+            label = QLabel(name)
+            label.setObjectName('performanceMuted')
+            chart_layout.addWidget(label)
+            graph = HistoryGraph(color)
+            graph.setMinimumHeight(120)
+            graph.setAccessibleName(f'{name} history')
+            chart_layout.addWidget(graph, 1)
+            layout.addWidget(chart, 1)
+            plots.append((chart, graph))
+        stats = _GpuStatistics()
+        layout.addWidget(stats)
+        footer = QLabel()
+        footer.setObjectName("performanceMuted")
+        footer.setWordWrap(True)
+        footer.setToolTip("Telemetry depends on the GPU hardware and the readings exposed by its Linux driver.")
+        layout.addWidget(footer)
+        layout.addStretch()
+        area = QScrollArea()
+        area.setWidgetResizable(True)
+        area.setFrameShape(QFrame.Shape.NoFrame)
+        area.setWidget(panel)
+        self.details.addWidget(area)
+        self.gpu_views[gpu.identity] = _GpuView(card, gpu.name, plots, stats, footer)
+
+    def update_gpu(self, view: _GpuView, gpu: GpuSample | None) -> None:
+        info = view.name
+        utilization = "utilization" in view.capabilities
+        memory_chart = GPU_MEMORY_KEYS <= view.capabilities
+        if memory_chart:
+            used = capacity(gpu.memory_used) if gpu and gpu.memory_used is not None else "—"
+            total = capacity(gpu.memory_total) if gpu and gpu.memory_total is not None else "—"
+            info += f"\nGPU memory {used} / {total}"
+        view.card.display(gpu.utilization if gpu else None, info)
+        view.card.value.setVisible(utilization)
+        view.card.graph.setVisible(utilization)
+        if utilization:
+            view.card.graph.set_series(view.usage.samples, self.anchor, self.duration)
+        for (chart, graph), history, visible in zip(
+            view.plots, (view.usage, view.memory), (utilization, memory_chart), strict=True,
+        ):
+            chart.setVisible(visible)
+            if visible:
+                graph.set_series(history.samples, self.anchor, self.duration)
+        readings = {"utilization": percent(gpu.utilization if gpu else None)}
+        for key in ("memory_used", "memory_total", "gtt_used", "gtt_total"):
+            readings[key] = capacity(getattr(gpu, key) if gpu else None)
+        for key, unit in GPU_SENSOR_UNITS.items():
+            value = gpu.sensors.get(key) if gpu else None
+            readings[key] = f"{value:.1f} {unit}" if value is not None else UNAVAILABLE
+        view.stats.display({key: value for key, value in readings.items() if key in view.capabilities})
+        if not view.capabilities:
+            view.footer.setText("No telemetry is available for this GPU.")
+        else:
+            view.footer.setText("Additional telemetry is unavailable for this GPU.")
+        view.footer.setVisible(not GPU_STAT_NAMES.keys() <= view.capabilities)
 
     def render_logical_cpus(self) -> None:
         self.logical_scale.setText(

@@ -7,6 +7,8 @@ import time
 
 import psutil
 
+from taskpup.gpu import GpuSample, discover
+
 
 PROC = Path("/proc")
 _CPU_FIELDS = 8  # user through steal; guest fields duplicate user/nice.
@@ -48,6 +50,7 @@ class SystemSample:
     uptime_s: float | None
     memory: MemorySample | None
     swap: SwapSample | None
+    gpus: tuple[GpuSample, ...] = ()
 
 
 _CpuTimes = tuple[int, ...]
@@ -87,6 +90,7 @@ class SystemSampler:
     """Collect system metrics while keeping only the previous delta baselines."""
 
     def __init__(self) -> None:
+        self._gpus = None
         self._previous_cpu: _CpuTimes | None = None
         self._previous_logical: dict[int, _CpuTimes] = {}
         self._previous_cpu_ids: frozenset[int] = frozenset()
@@ -119,6 +123,8 @@ class SystemSampler:
             self._discover_static_cpu()
             frequency = self._read_frequency()
             temperature = self._read_temperature()
+            if self._gpus is None:
+                self._gpus = discover()
 
         return SystemSample(
             timestamp=timestamp,
@@ -132,6 +138,7 @@ class SystemSampler:
             uptime_s=uptime,
             memory=memory,
             swap=swap,
+            gpus=tuple(gpu.sample() for gpu in self._gpus) if detailed and self._gpus is not None else (),
         )
 
     @staticmethod
