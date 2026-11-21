@@ -19,6 +19,7 @@ from taskpup.model import COLUMNS, WIDTHS, ProcessModel
 from taskpup.platform import logo_path, open_executable_location, start_task
 from taskpup.processes import Identity, ProcessRow, Resources, Snapshot
 from taskpup.refresh import RefreshController
+from taskpup.report_dialog import ReportDialog
 from taskpup.settings import Settings
 
 
@@ -65,6 +66,8 @@ class MainWindow(QMainWindow):
         self.refresh = RefreshController(self)
 
         self.setWindowTitle("TaskPup")
+        report_action = self.menuBar().addAction("Export System Report…")
+        report_action.triggered.connect(self.export_report)
         self.resize(1210, 740)
         self.setMinimumSize(770, 470)
         body = QWidget()
@@ -235,6 +238,9 @@ class MainWindow(QMainWindow):
         action.setShortcut(QKeySequence(shortcut))
         action.triggered.connect(callback)
         self.addAction(action)
+
+    def export_report(self) -> None:
+        ReportDialog(self).exec()
 
     def focus_search(self) -> None:
         self.navigation.setCurrentIndex(0)

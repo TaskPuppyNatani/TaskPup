@@ -50,6 +50,12 @@ The terminal launcher is the verified startup path on Cinnamon/X11. TaskPup supp
 - **Network** shows receive and transmit rates from Linux per-interface counters, with interface type and link state from Linux metadata and psutil. Local link speed, when exposed, describes the interface and is not its current throughput. **Show loopback and virtual** reveals auxiliary interfaces hidden by default. Each interface has its own readings. Traffic may be visible on both a bridge or virtual interface and an underlying link, so the per-interface readings should not be summed as an aggregate.
 - Throughput uses binary byte-per-second units. Rates resume after a new baseline is available, and a temporarily unavailable counter is shown as unavailable. Telemetry uses read-only Linux interfaces and reflects devices visible to the running user.
 
+## Export a system report
+
+Choose **Export System Report…**, select the diagnostic sections and output format, then choose a destination. Collection and export run in the background. Privacy protection is enabled by default. Disabling it includes more identifiers. Always review a report before sharing: automated redaction cannot guarantee removal of every sensitive value. Passwords, tokens, private keys and credential-file contents are not intentionally collected.
+
+Markdown, JSON Lines and standalone HTML use the same collected snapshot. **All formats** saves a ZIP with one file of each type. JSON Lines schema version 1 uses one JSON object per line with `schema_version`, `record_type`, `section`, `timestamp`, and `data`; records describe metadata, selected sections, and collection errors. Missing values are represented as null where applicable. Availability depends on the Linux interfaces and permissions of the desktop user.
+
 ## Development checks
 
 ```bash
