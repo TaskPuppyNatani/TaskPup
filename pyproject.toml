@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "taskpup"
+version = "0.1.0"
+description = "A native Linux graphical process manager"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["PySide6-Essentials>=6.8,<7", "psutil>=6,<9"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10", "pyright>=1.1.400,<2"]
+
+[project.scripts]
+taskpup = "taskpup.app:main"
+
+[tool.hatch.build]
+dev-mode-dirs = ["src"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/taskpup"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"assets/TaskPuppyLogo.png" = "taskpup/TaskPuppyLogo.png"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.11"
+pythonPlatform = "Linux"
+venvPath = "."
+venv = ".venv"
+typeCheckingMode = "standard"
