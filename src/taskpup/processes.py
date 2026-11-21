@@ -11,6 +11,8 @@ import time
 
 import psutil
 
+from taskpup.metrics import SystemSample, SystemSampler
+
 
 PROC = Path("/proc")
 CLOCK_TICKS = os.sysconf("SC_CLK_TCK")
@@ -66,8 +68,18 @@ class ProcessRow:
 @dataclass(frozen=True, slots=True)
 class Resources:
     cpu: float | None
-    ram: float
+    ram: float | None
     swap: float | None
+    swap_configured: bool | None = None
+
+    @classmethod
+    def from_sample(cls, sample: SystemSample) -> "Resources":
+        return cls(
+            sample.cpu_percent,
+            sample.memory.percent if sample.memory is not None else None,
+            sample.swap.percent if sample.swap is not None else None,
+            bool(sample.swap.total) if sample.swap is not None else None,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,19 +143,17 @@ def describe(stat: ProcStat) -> tuple[int | None, str, str]:
 
 
 class Sampler:
-    def __init__(self) -> None:
+    def __init__(self, system: SystemSampler | None = None) -> None:
+        self.system = system if system is not None else SystemSampler()
         self.previous: dict[Identity, int] = {}
         self.previous_time: float | None = None
-        self.cpu_primed = False
         self.usernames: dict[int, str] = {}
 
-    def sample(self, stop: Event) -> Snapshot:
+    def sample(self, stop: Event, resources: Resources | None = None) -> Snapshot:
         now = time.monotonic()
         elapsed = now - self.previous_time if self.previous_time is not None else 0
-        # psutil keeps its non-blocking CPU baseline per thread.
-        system_cpu = psutil.cpu_percent(interval=None)
-        ram = psutil.virtual_memory()
-        swap = psutil.swap_memory()
+        if resources is None:
+            resources = Resources.from_sample(self.system.sample(detailed=False))
         current: dict[Identity, int] = {}
         rows: list[ProcessRow] = []
         for stat in iter_stats(stop):
@@ -164,12 +174,6 @@ class Sampler:
             username = self.username(uid) if uid is not None else ""
             rows.append(ProcessRow(stat, uid, username, cpu, executable, command))
 
-        resources = Resources(
-            system_cpu if self.cpu_primed else None,
-            ram.percent,
-            swap.percent if swap.total else None,
-        )
-        self.cpu_primed = True
         self.previous, self.previous_time = current, now
         return Snapshot(tuple(rows), resources)
 

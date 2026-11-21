@@ -14,19 +14,13 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton
 
 from taskpup import app, dialogs, management
+from taskpup.metrics import MemorySample, SwapSample, SystemSample, SystemSampler
 from taskpup.model import ProcessModel
 from taskpup.platform import start_task
 from taskpup.processes import Identity, ProcessRow, ProcStat, Resources, Snapshot
 from taskpup.refresh import RefreshController
 from taskpup.settings import Settings
 from taskpup.window import MainWindow
-
-
-@pytest.fixture(scope="module")
-def qt_app():
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    application = QApplication([])
-    yield application
 
 
 @pytest.fixture
@@ -65,6 +59,119 @@ def row(pid: int, name: str, *, parent: int = 0, uid: int = 1000, start: int = 1
 
 def snapshot(*rows: ProcessRow) -> Snapshot:
     return Snapshot(rows, Resources(20.5, 43.3, None))
+
+
+def system_reading(logical: dict[int, float | None] | None = None) -> SystemSample:
+    cores: dict[int, float | None] = logical if logical is not None else {0: 7.5, 2: 25.4}
+    return SystemSample(
+        time.monotonic(), 15.2, cores, "Test CPU", 3200.0, 2, len(cores), None, 1200.0,
+        MemorySample(1024**3, 512 * 1024**2, 512 * 1024**2, 50.0, None, None),
+        SwapSample(0, 0, 0, None, None, None),
+    )
+
+
+def test_performance_navigation_retains_process_state_and_history(window: MainWindow) -> None:
+    window.refresh.stop()
+    target = row(311, "editor", uid=os.getuid())
+    window.apply_snapshot(snapshot(target, row(312, "worker", uid=os.getuid())))
+    window.search.setText("editor")
+    window.view.setCurrentIndex(window.model.index_for(target.identity))
+    window.apply_performance(system_reading())
+    dashboard = window.performance
+
+    window.navigation.setCurrentIndex(1)
+    assert dashboard.isVisible() and dashboard.statistics[0]["Utilization"].text() == "15.2%"
+    QApplication.processEvents()
+    assert all(card.rect().contains(card.graph.geometry()) for card in dashboard.cards)
+    dashboard.logical_mode.click()
+    assert set(dashboard.logical_tiles) == {0, 2}
+    tile = dashboard.logical_tiles[2][0]
+    dashboard.cards[1].click()
+    window.apply_performance(system_reading({2: None, 4: 11.0}))
+    assert dashboard.statistics[1]["Used"].text() == "512.0 MiB"
+    dashboard.cards[0].click()
+    assert set(dashboard.logical_tiles) == {2, 4} and dashboard.logical_tiles[2][0] is tile
+    assert dashboard.logical_histories[2].samples[-1][1] is None
+    dashboard.cards[2].click()
+    assert dashboard.subtitles[2].text() == "No swap configured"
+    assert dashboard.statistics[2]["Utilization"].text() == "Unavailable"
+    assert [value for _, value in dashboard.histories[2].samples] == [None, None]
+
+    window.navigation.setCurrentIndex(0)
+    assert window.selected() == target and window.search.text() == "editor"
+    window.navigation.setCurrentIndex(1)
+    assert dashboard.details.currentIndex() == 2 and len(dashboard.histories[0].samples) == 2
+
+
+def test_performance_pause_and_settings_survive_reopening(window: MainWindow) -> None:
+    window.refresh.stop()
+    page = window.performance
+    page.record_sample(system_reading())
+    page.pause.click()
+    held = page.histories[0].samples
+    assert page.state.text() == "Paused" and held[-1][1] is None
+    page.record_sample(system_reading())
+    assert page.histories[0].samples == held
+    page.pause.click()
+    page.record_sample(system_reading())
+    assert page.state.text() == "Live" and page.histories[0].samples[-1][1] == 15.2
+
+    page.duration_box.setCurrentIndex(page.duration_box.findData(900))
+    page.interval_box.setCurrentIndex(page.interval_box.findData(5))
+    page.logical_mode.setChecked(True)
+    page.cards[1].click()
+    page.pause.click()
+    window.close()
+    reopened = MainWindow(window.settings)
+    try:
+        page = reopened.performance
+        assert (page.duration, page.interval, page.resource) == (900, 5, 1)
+        assert page.logical_mode.isChecked() and page.pause.isChecked()
+        assert not reopened.refresh.performance_interval.isActive()
+        assert reopened.refresh.interval.isActive()
+    finally:
+        reopened.close()
+
+
+def test_worker_discards_inflight_reading_on_pause_and_resumes(qt_app: QApplication) -> None:
+    started = Event()
+    release = Event()
+    detailed_calls: list[int] = []
+    deliveries: list[int] = []
+    scans: list[int] = []
+
+    class ControlledSystem(SystemSampler):
+        def sample(self, *, detailed: bool = True) -> SystemSample:
+            assert detailed
+            detailed_calls.append(get_ident())
+            if len(detailed_calls) == 1:
+                started.set()
+                release.wait(3)
+            return system_reading()
+
+    def sample_processes(_: Event) -> Snapshot:
+        scans.append(get_ident())
+        return snapshot()
+
+    controller = RefreshController(qt_app, sample_processes, ControlledSystem())
+    controller.load_icons = False
+    controller.performance_ready.connect(lambda _: deliveries.append(get_ident()))
+    try:
+        controller.set_performance(5000, True)
+        wait_for(started.is_set)
+        controller.set_performance(5000, False)
+        controller.manual()
+        release.set()
+        wait_for(lambda: len(scans) == 1 and controller.future is None)
+        assert not deliveries and not controller.performance_interval.isActive()
+        controller.set_performance(5000, True)
+        wait_for(lambda: len(deliveries) == 1)
+        assert len(set(scans + detailed_calls)) == 1 and detailed_calls[0] != get_ident()
+        assert deliveries == [get_ident()] and len(scans) == 1
+    finally:
+        release.set()
+        controller.stop()
+    assert controller.stop_requested.is_set() and not controller.performance_interval.isActive()
 
 
 def test_total_processes_uses_latest_valid_unfiltered_snapshot(window: MainWindow) -> None:
@@ -233,6 +340,7 @@ def test_live_window_startup_auto_refresh_and_settings(window: MainWindow) -> No
     assert window.ram.value.text().endswith("%")
     window.auto.setChecked(False)
     assert not window.refresh.interval.isActive()
+    assert window.refresh.performance_interval.isActive()
     window.mode.setCurrentIndex(1)
     window.view.setColumnHidden(3, True)
     window.close()

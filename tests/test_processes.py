@@ -39,11 +39,12 @@ def test_process_discovery_and_refresh(sleeper: subprocess.Popen) -> None:
     assert "taskpup-test" in row.command
     assert row.executable and row.stat.rss > 0 and row.stat.threads >= 1
     assert row.cpu is None and first.resources.cpu is None
+    time.sleep(0.02)
     second = sampler.sample(Event())
     row = next(candidate for candidate in second.rows if candidate.identity == row.identity)
     assert row.cpu is not None and row.cpu >= 0
     assert second.resources.cpu is not None and 0 <= second.resources.cpu <= 100
-    assert 0 <= second.resources.ram <= 100
+    assert second.resources.ram is not None and 0 <= second.resources.ram <= 100
 
 
 def test_sampling_skips_disappearance_and_replacement(monkeypatch: pytest.MonkeyPatch) -> None:

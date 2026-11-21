@@ -13,6 +13,17 @@ class Settings:
     def option(self, key: str, default: bool) -> bool:
         return bool(self.store.value(key, default, type=bool))
 
+    def choice(self, key: str, default: int, choices: tuple[int, ...]) -> int:
+        value = self.store.value(key, default, type=int)
+        return value if isinstance(value, int) and value in choices else default
+
+    def save_performance(self, *, duration: int, interval: int, paused: bool, resource: int, logical: bool) -> None:
+        self.store.setValue("performance/duration", duration)
+        self.store.setValue("performance/interval", interval)
+        self.store.setValue("performance/paused", paused)
+        self.store.setValue("performance/resource", resource)
+        self.store.setValue("performance/logical", logical)
+
     def restore(self, window: QMainWindow, view: QTreeView) -> None:
         geometry = self.store.value("window/geometry")
         if isinstance(geometry, QByteArray):

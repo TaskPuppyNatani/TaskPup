@@ -9,13 +9,15 @@ from PySide6.QtGui import QAction, QBitmap, QCloseEvent, QImage, QKeySequence, Q
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QFrame, QHBoxLayout,
     QInputDialog, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QProgressBar,
-    QPushButton, QTreeView, QVBoxLayout, QWidget,
+    QPushButton, QStackedWidget, QTabBar, QTreeView, QVBoxLayout, QWidget,
 )
 
 from taskpup import dialogs, management
+from taskpup.dashboard import PerformanceDashboard
+from taskpup.metrics import SystemSample
 from taskpup.model import COLUMNS, WIDTHS, ProcessModel
 from taskpup.platform import logo_path, open_executable_location, start_task
-from taskpup.processes import Identity, ProcessRow, Snapshot
+from taskpup.processes import Identity, ProcessRow, Resources, Snapshot
 from taskpup.refresh import RefreshController
 from taskpup.settings import Settings
 
@@ -101,6 +103,25 @@ class MainWindow(QMainWindow):
         brand_row.addWidget(run, alignment=Qt.AlignmentFlag.AlignVCenter)
         layout.addLayout(brand_row)
 
+        self.navigation = QTabBar()
+        self.navigation.setObjectName("mainNavigation")
+        self.navigation.setAccessibleName("TaskPup views")
+        self.navigation.setExpanding(False)
+        self.navigation.setDrawBase(False)
+        self.navigation.addTab("Processes")
+        self.navigation.addTab("Performance")
+        layout.addWidget(self.navigation, alignment=Qt.AlignmentFlag.AlignLeft)
+        pages = QStackedWidget()
+        processes = QWidget()
+        self.performance = PerformanceDashboard(self.settings)
+        pages.addWidget(processes)
+        pages.addWidget(self.performance)
+        self.navigation.currentChanged.connect(pages.setCurrentIndex)
+        layout.addWidget(pages, 1)
+
+        layout = QVBoxLayout(processes)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(11)
         summary = QHBoxLayout()
         self.cpu = Metric("CPU utilization")
         self.ram = Metric("RAM usage", secondary=True)
@@ -194,14 +215,18 @@ class MainWindow(QMainWindow):
         self.add_shortcut("Ctrl+N", self.run_task)
         self.add_shortcut("Ctrl+F", self.focus_search)
         self.add_shortcut("F5", self.refresh.manual)
-        self.add_shortcut("Alt+Return", lambda: self.with_selection(self.properties))
+        self.add_shortcut("Alt+Return", self.process_properties_shortcut)
 
         self.refresh.ready.connect(self.apply_snapshot)
         self.refresh.icons_ready.connect(self.apply_icons)
         self.refresh.failed.connect(self.refresh_failed)
+        self.refresh.performance_ready.connect(self.apply_performance)
+        self.refresh.performance_failed.connect(self.performance.record_failure)
+        self.performance.monitoring_changed.connect(self.refresh.set_performance)
         self.set_auto(self.auto.isChecked())
         self.statusBar().showMessage("Reading processes…")
         self.redraw()
+        self.performance.configure()
         self.refresh.request()
 
     def add_shortcut(self, shortcut: str, callback: Callable[[], None]) -> None:
@@ -211,8 +236,13 @@ class MainWindow(QMainWindow):
         self.addAction(action)
 
     def focus_search(self) -> None:
+        self.navigation.setCurrentIndex(0)
         self.search.setFocus()
         self.search.selectAll()
+
+    def process_properties_shortcut(self) -> None:
+        if self.navigation.currentIndex() == 0:
+            self.with_selection(self.properties)
 
     def update_columns_menu(self, columns: QMenu) -> None:
         for column, action in enumerate(columns.actions(), 1):
@@ -221,7 +251,7 @@ class MainWindow(QMainWindow):
 
     def set_auto(self, enabled: bool) -> None:
         self.refresh.set_auto(enabled)
-        self.statusBar().showMessage("Auto-refresh on · 1.5 s interval" if enabled else "Auto-refresh paused")
+        self.statusBar().showMessage("Process auto-refresh on · 1.5 s interval" if enabled else "Process auto-refresh paused")
 
     def apply_icons(self, icons: dict[str, str]) -> None:
         self.model.icons = icons
@@ -231,13 +261,22 @@ class MainWindow(QMainWindow):
         self.rows = snapshot.rows
         self.collapsed.intersection_update(row.identity for row in self.rows)
         self.redraw()
-        resources = snapshot.resources
+        self.apply_resources(snapshot.resources)
+        self.total_processes.display(len(snapshot.rows))
+        self.performance.update_process_totals(len(snapshot.rows), sum(row.stat.threads for row in snapshot.rows))
+        if self.statusBar().currentMessage().startswith(("Reading", "Refresh failed")):
+            self.statusBar().showMessage(
+                "Process auto-refresh on · 1.5 s interval" if self.auto.isChecked() else "Process auto-refresh paused"
+            )
+
+    def apply_resources(self, resources: Resources) -> None:
         self.cpu.display(resources.cpu)
         self.ram.display(resources.ram)
-        self.swap.display(resources.swap, "No swap")
-        self.total_processes.display(len(snapshot.rows))
-        if self.statusBar().currentMessage().startswith(("Reading", "Refresh failed")):
-            self.statusBar().showMessage("Auto-refresh on · 1.5 s interval" if self.auto.isChecked() else "Auto-refresh paused")
+        self.swap.display(resources.swap, "No swap" if resources.swap_configured is False else "—")
+
+    def apply_performance(self, sample: SystemSample) -> None:
+        self.apply_resources(Resources.from_sample(sample))
+        self.performance.record_sample(sample)
 
     def refresh_failed(self, error: str) -> None:
         self.statusBar().showMessage(f"Refresh failed. {error}")
@@ -430,6 +469,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self.refresh.stop()
+        self.performance.save()
         self.settings.save(
             self, self.view, auto=self.auto.isChecked(), tree=self.mode.currentIndex() == 1,
             mine=self.mine.isChecked(),
