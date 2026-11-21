@@ -15,6 +15,17 @@ from PySide6.QtWidgets import QToolTip, QWidget
 Sample = tuple[float, float | None]
 
 
+def rate_text(value: float) -> str:
+    if value < 1:
+        return f"{value:.2g} B/s"
+    for unit in ("B/s", "KiB/s", "MiB/s", "GiB/s", "TiB/s"):
+        if value < 1024 or unit == "TiB/s":
+            digits = 0 if unit == "B/s" else 1
+            return f"{value:,.{digits}f} {unit}"
+        value /= 1024
+    return ""
+
+
 def _finite_number(value: float, name: str) -> float:
     try:
         result = float(value)
@@ -64,6 +75,7 @@ class HistoryGraph(QWidget):
         maximum: float | None = 100.0,
         unit: str = "%",
         fill: bool = True,
+        secondary_color: str | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -77,6 +89,8 @@ class HistoryGraph(QWidget):
         if not self._color.isValid():
             self._color = self.palette().color(self.foregroundRole())
         self._samples: tuple[Sample, ...] = ()
+        self._secondary_samples: tuple[Sample, ...] = ()
+        self._secondary_color = QColor(secondary_color) if secondary_color else None
         self._now: float | None = None
         self._duration = 60
         self.setMouseTracking(True)
@@ -87,6 +101,8 @@ class HistoryGraph(QWidget):
         samples: Sequence[tuple[float, float | None]],
         now: float | None,
         duration: int,
+        *,
+        secondary: Sequence[Sample] = (),
     ) -> None:
         """Set visible history and repaint; timestamps must be strictly ordered."""
         if isinstance(duration, bool) or not isinstance(duration, int) or duration <= 0:
@@ -101,10 +117,17 @@ class HistoryGraph(QWidget):
 
         if now is None:
             self._samples = ()
+            self._secondary_samples = ()
         else:
             first = bisect_left(samples, now - duration, key=lambda sample: sample[0])
             last = bisect_right(samples, now, key=lambda sample: sample[0])
             self._samples = tuple(samples[first:last])
+            if secondary:
+                first = bisect_left(secondary, now - duration, key=lambda sample: sample[0])
+                last = bisect_right(secondary, now, key=lambda sample: sample[0])
+                self._secondary_samples = tuple(secondary[first:last])
+            else:
+                self._secondary_samples = ()
         self.update()
 
     def paintEvent(self, event: QPaintEvent) -> None:
@@ -120,7 +143,9 @@ class HistoryGraph(QWidget):
 
         value_maximum = self._value_maximum()
         self._draw_axes(painter, plot)
-        self._draw_series(painter, plot, value_maximum)
+        self._draw_series(painter, plot, value_maximum, self._samples, self._color)
+        if self._secondary_color is not None and self._secondary_samples:
+            self._draw_series(painter, plot, value_maximum, self._secondary_samples, self._secondary_color)
         if not self.compact and not any(value is not None for _, value in self._samples):
             painter.setPen(self.palette().color(self.foregroundRole()))
             painter.drawText(plot, Qt.AlignmentFlag.AlignCenter, "No readings in this interval")
@@ -140,7 +165,7 @@ class HistoryGraph(QWidget):
             QToolTip.hideText()
             return
         age = max(0.0, self._now - sample[0])
-        reading = f"{sample[1]:.1f}{self.unit}" if sample[1] is not None else "Unavailable"
+        reading = self._format(sample[1]) if sample[1] is not None else "Unavailable"
         self.setToolTip(f"{reading} · {age:.1f}s ago")
         QToolTip.showText(event.globalPosition().toPoint(), self.toolTip(), self)
 
@@ -160,11 +185,24 @@ class HistoryGraph(QWidget):
     def _value_maximum(self) -> float:
         if self.maximum is not None:
             return self.maximum
-        values = [value for _, value in self._samples if value is not None]
-        return max(0.0, max(values, default=0.0)) or 1.0
+        largest = max((value for _, value in self._samples + self._secondary_samples if value is not None), default=0.0)
+        if self.unit == "B/s":
+            if largest <= 1:
+                return 1.0
+            scale = 1024 ** min(int(math.log(largest, 1024)), 4)
+            for step in (1, 2, 5, 10, 20, 50, 100, 200, 500, 1024):
+                if step * scale >= largest:
+                    return float(step * scale)
+            return largest
+        return max(0.0, largest) or 1.0
+
+    def _format(self, value: float) -> str:
+        return rate_text(value) if self.unit == "B/s" else f"{value:.1f}{self.unit}"
 
     def _y_labels(self) -> tuple[str, str, str]:
         maximum = self._value_maximum()
+        if self.unit == "B/s":
+            return rate_text(maximum), rate_text(maximum / 2), "0 B/s"
         return (f"{maximum:g}{self.unit}", f"{maximum / 2:g}{self.unit}", f"0{self.unit}")
 
     def _draw_axes(self, painter: QPainter, plot: QRectF) -> None:
@@ -194,20 +232,22 @@ class HistoryGraph(QWidget):
         painter.drawText(QRectF(plot.right() - 45.0, plot.bottom() + 3.0, 45.0, font_height),
                          Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop, "Now")
 
-    def _draw_series(self, painter: QPainter, plot: QRectF, maximum: float) -> None:
-        if self._now is None or not self._samples:
+    def _draw_series(
+        self, painter: QPainter, plot: QRectF, maximum: float, samples: Sequence[Sample], color: QColor,
+    ) -> None:
+        if self._now is None or not samples:
             return
         start = self._now - self._duration
         painter.save()
         painter.setClipRect(plot)
-        fill = QColor(self._color)
+        fill = QColor(color)
         fill.setAlpha(28)
-        pen = QPen(self._color)
+        pen = QPen(color)
         pen.setWidthF(1.6 if not self.compact else 1.25)
         painter.setPen(pen)
         segments: list[list[tuple[float, float]]] = []
         current: list[tuple[float, float]] = []
-        for timestamp, value in self._samples:
+        for timestamp, value in samples:
             if value is None:
                 if current:
                     segments.append(current)

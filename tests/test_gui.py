@@ -15,12 +15,14 @@ from PySide6.QtWidgets import QApplication, QLabel, QPushButton
 
 from taskpup import app, dialogs, management
 from taskpup.metrics import MemorySample, SwapSample, SystemSample, SystemSampler
+from taskpup.network import InterfaceSample
 from taskpup.gpu import GpuSample
 from taskpup.model import ProcessModel
 from taskpup.platform import start_task
 from taskpup.processes import Identity, ProcessRow, ProcStat, Resources, Snapshot
 from taskpup.refresh import RefreshController
 from taskpup.settings import Settings
+from taskpup.storage import DiskSample, Filesystem, StorageSample
 from taskpup.window import MainWindow
 
 
@@ -122,6 +124,8 @@ def test_performance_pause_and_settings_survive_reopening(window: MainWindow) ->
     page.logical_mode.setChecked(True)
     page.cards[1].click()
     page.pause.click()
+    assert page.network.show_auxiliary is not None
+    page.network.show_auxiliary.setChecked(True)
     window.close()
     reopened = MainWindow(window.settings)
     try:
@@ -130,6 +134,7 @@ def test_performance_pause_and_settings_survive_reopening(window: MainWindow) ->
         assert page.logical_mode.isChecked() and page.pause.isChecked()
         assert not reopened.refresh.performance_interval.isActive()
         assert reopened.refresh.interval.isActive()
+        assert page.network.show_auxiliary is not None and page.network.show_auxiliary.isChecked()
     finally:
         reopened.close()
 
@@ -199,13 +204,114 @@ def test_gpu_display_adapts_to_device_capabilities(window: MainWindow) -> None:
     assert partial_view.stats.values == values
     assert all(value.text() == "Unavailable" for value in values.values())
     assert partial_view.plots[0][0].isVisible() and partial_view.usage.samples[-1][1] is None
-
     page.cards[5].click()
     assert empty_view.stats.isHidden()
     assert empty_view.card.graph.isHidden()
     assert all(chart.isHidden() for chart, _ in empty_view.plots)
     assert "No telemetry" in empty_view.footer.text()
 
+
+def test_storage_and_network_navigation_pause_and_temporary_loss(window: MainWindow) -> None:
+    window.refresh.stop()
+    window.navigation.setCurrentIndex(1)
+    page = window.performance
+    disk = DiskSample(
+        name="nvme2n1", label="Fixture NVMe", kind="NVMe SSD", capacity=2**40,
+        temperature_supported=True, temperature_c=None, read_rate=1024, write_rate=0,
+        activity=None, bytes_read=2**30, bytes_written=0, activity_supported=True,
+    )
+    mount = Filesystem(mountpoint="/data", fstype="btrfs", total=2**30, used=0, available=2**30, percent=0)
+    eth = InterfaceSample(
+        name="eth-fixture", kind="Ethernet", auxiliary=False, status="Connected",
+        speed_supported=True, speed_mbps=None, receive_rate=512, transmit_rate=0,
+        bytes_received=2**20, bytes_transmitted=0,
+    )
+    loop = replace(eth, name="lo", kind="Loopback", auxiliary=True, speed_supported=False)
+    network = {"ethernet": eth, "loop": loop}
+
+    def combined() -> SystemSample:
+        sample = system_reading()
+        return replace(sample, storage=StorageSample(sample.timestamp, {"disk": disk}, (mount,)), network=network)
+
+    page.record_sample(combined())
+    storage_view = page.storage.views["disk"]
+    assert page.network.views["loop"].card.isHidden()
+    aux = page.network.show_auxiliary
+    assert aux is not None
+    aux.click()
+    assert not page.network.views["loop"].card.isHidden()
+    page.network.views["loop"].card.click()
+    assert page.details.currentWidget() is page.network.page
+    assert page.network.page.values["Local link speed"][1].isHidden()
+    aux.click()
+    assert page.details.currentIndex() == 0
+    storage_view.card.click()
+    assert page.details.currentWidget() is page.storage.page
+    values = page.storage.page.values
+    assert values["Read"][1].text() == "1.0 KiB/s"
+    assert values["Write"][1].text() == "0 B/s"
+    assert values["Device active time"][1].isVisible()
+    assert values["Temperature"][1].text() == "Unavailable"
+    assert values["Temperature"][1].isVisible()
+    assert page.storage.mounts_button is not None
+    page.storage.mounts_button.click()
+    table = page.storage.page.mounts
+    assert table is not None and table.rowCount() == 1
+    fs_type = table.item(0, 1)
+    assert fs_type is not None and fs_type.text() == "btrfs"
+    page.network.views["ethernet"].card.click()
+    assert page.network.page.values["Local link speed"][1].text() == "Unavailable"
+    page.record_sample(system_reading())  # the individual collectors failed
+    assert page.network.views["ethernet"].histories[0].samples[-1][1] is None
+    assert page.network.page.values["Local link speed"][1].isVisible()
+    page.pause.click()
+    old = storage_view.histories[0].samples
+    page.record_sample(combined())
+    assert storage_view.histories[0].samples == old
+    page.pause.click()
+    page.record_sample(combined())
+    assert [value for _, value in storage_view.histories[0].samples] == [1024, None, None, 1024]
+    with_missing_capacity = system_reading()
+    status = StorageSample(with_missing_capacity.timestamp, {"disk": replace(disk, capacity=None)}, (),
+                           filesystems_available=False)
+    page.record_sample(replace(with_missing_capacity, storage=status, network=network))
+    storage_view.card.click()
+    capacity = page.storage.page.values["Device capacity"][1]
+    assert capacity.isVisible() and capacity.text() == "Unavailable"
+    page.storage.mounts_button.click()
+    assert page.storage.page.mount_status.text() == "Filesystem readings are unavailable."
+    empty = system_reading()
+    page.record_sample(replace(empty, storage=StorageSample(empty.timestamp, {}, ()), network={}))
+    assert not page.storage.views and not page.network.views and page.details.currentIndex() == 0
+
+
+def test_transfer_sidebar_scrolls_without_clipping_existing_cards(window: MainWindow) -> None:
+    window.refresh.stop()
+    window.navigation.setCurrentIndex(1)
+    window.resize(770, 470)
+    page = window.performance
+    disk = DiskSample(
+        name="sda", label="Disk", kind="SATA SSD", capacity=None,
+        temperature_supported=False, temperature_c=None, read_rate=0, write_rate=0,
+        activity=None, bytes_read=0, bytes_written=0,
+    )
+    system = system_reading()
+    sample = replace(
+        system,
+        gpus=(GpuSample("pci", "Test GPU", "amdgpu", 12, 1, 100, 2, 200, {}),),
+        storage=StorageSample(system.timestamp, {str(i): replace(disk, name=f"disk{i}") for i in range(5)}, ()),
+    )
+    page.record_sample(sample)
+    QApplication.processEvents()
+    assert page.sidebar_scroll.verticalScrollBar().maximum() > 0
+    for card in (*page.cards, *(view.card for view in page.storage.views.values())):
+        assert card.rect().contains(card.graph.geometry())
+    last = page.storage.views["4"].card
+    page.sidebar_scroll.ensureWidgetVisible(last)
+    assert page.sidebar_scroll.verticalScrollBar().value() > 0
+    last.click()
+    assert page.details.currentWidget() is page.storage.page
+    assert page.storage.page.values["Temperature"][1].isHidden()
 
 def test_worker_discards_inflight_reading_on_pause_and_resumes(qt_app: QApplication) -> None:
     started = Event()

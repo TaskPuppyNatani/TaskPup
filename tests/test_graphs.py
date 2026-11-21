@@ -4,7 +4,7 @@ import pytest
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication
 
-from taskpup.graphs import History, HistoryGraph
+from taskpup.graphs import History, HistoryGraph, rate_text
 
 
 def test_history_keeps_only_900_seconds_and_preserves_gaps() -> None:
@@ -60,6 +60,18 @@ def test_history_graph_uses_latest_sample_when_now_is_missing(qt_app: QApplicati
 
     assert graph._now == 5.0
     assert graph._y_labels() == ("100%", "50%", "0%")
+
+
+def test_throughput_axes_scale_to_visible_samples_and_both_traces(qt_app: QApplication) -> None:
+    graph = HistoryGraph("#cb94ff", maximum=None, unit="B/s", secondary_color="#8fe7ac")
+    graph.set_series(((10, 2**30), (50, None), (80, 0)), now=80, duration=35,
+                     secondary=((50, 1500), (80, 2000)))
+    assert graph._value_maximum() == 2048
+    assert graph._y_labels() == ("2.0 KiB/s", "1.0 KiB/s", "0 B/s")
+    graph.set_series(((81, 0),), now=81, duration=30)
+    assert graph._value_maximum() == 1
+    assert not graph._secondary_samples
+    assert rate_text(0) == "0 B/s" and rate_text(0.25) == "0.25 B/s"
 
 
 def test_percentage_plot_places_high_values_above_low_values(qt_app: QApplication) -> None:

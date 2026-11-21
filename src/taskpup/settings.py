@@ -17,12 +17,15 @@ class Settings:
         value = self.store.value(key, default, type=int)
         return value if isinstance(value, int) and value in choices else default
 
-    def save_performance(self, *, duration: int, interval: int, paused: bool, resource: int, logical: bool) -> None:
+    def save_performance(
+        self, *, duration: int, interval: int, paused: bool, resource: int, logical: bool, show_auxiliary: bool,
+    ) -> None:
         self.store.setValue("performance/duration", duration)
         self.store.setValue("performance/interval", interval)
         self.store.setValue("performance/paused", paused)
         self.store.setValue("performance/resource", resource)
         self.store.setValue("performance/logical", logical)
+        self.store.setValue("performance/show_auxiliary", show_auxiliary)
 
     def restore(self, window: QMainWindow, view: QTreeView) -> None:
         geometry = self.store.value("window/geometry")

@@ -4,6 +4,7 @@ import pytest
 
 from taskpup import metrics
 from taskpup.metrics import SystemSampler
+from taskpup.storage import StorageSample
 
 
 def cpu_line(name: str, values: list[int]) -> str:
@@ -33,6 +34,9 @@ def patch_resources(
         "swap_memory",
         lambda: swap or SimpleNamespace(total=100, used=25, free=75, percent=25, sin=0, sout=0),
     )
+    monkeypatch.setattr(metrics, "discover", lambda: ())
+    monkeypatch.setattr(metrics.StorageSampler, "sample", lambda _, stamp: StorageSample(stamp, {}, ()))
+    monkeypatch.setattr(metrics.NetworkSampler, "sample", lambda *_: {})
     if timestamps is not None:
         values = iter(timestamps)
         monkeypatch.setattr(metrics.time, "monotonic", lambda: next(values))
@@ -207,7 +211,7 @@ def test_zero_swap_counters_are_valid_when_vmstat_keys_exist(tmp_path, monkeypat
 
 def test_cpu_sensors_filter_non_cpu_and_detailed_false_skips_reads(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(metrics, "PROC", tmp_path)
-    patch_resources(monkeypatch, timestamps=[1.0, 2.0])
+    patch_resources(monkeypatch, timestamps=[1.0, 2.0, 2.1, 2.2])
     stat = [100, 0, 100, 800, 0, 0, 0, 0]
     cpuinfo = """processor : 0
 model name : Example CPU
@@ -250,7 +254,7 @@ core id : 0
 
 def test_numeric_processor_index_is_not_a_cpu_model(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(metrics, "PROC", tmp_path)
-    patch_resources(monkeypatch, timestamps=[1.0])
+    patch_resources(monkeypatch, timestamps=[1.0, 1.1, 1.2])
     monkeypatch.setattr(metrics.psutil, "cpu_count", lambda logical: None)
     monkeypatch.setattr(metrics.psutil, "cpu_freq", lambda: None)
     monkeypatch.setattr(metrics.psutil, "sensors_temperatures", lambda **_: {})
@@ -259,3 +263,32 @@ def test_numeric_processor_index_is_not_a_cpu_model(tmp_path, monkeypatch) -> No
     make_proc(tmp_path, "\n".join((cpu_line("cpu", counters), cpu_line("cpu0", counters), "")), cpuinfo=cpuinfo)
 
     assert SystemSampler().sample().cpu_model is None
+
+
+def test_transfer_sampling_uses_one_worker_cycle_and_resets_baselines(monkeypatch: pytest.MonkeyPatch) -> None:
+    patch_resources(monkeypatch, timestamps=[5.0, 6.0, 6.1, 6.2])
+    calls: list[tuple[str, float]] = []
+    monkeypatch.setattr(SystemSampler, "_read_frequency", lambda _: None)
+    monkeypatch.setattr(SystemSampler, "_read_temperature", lambda _: None)
+    sampler = SystemSampler()
+
+    def read_disk(stamp: float) -> StorageSample:
+        calls.append(("storage", stamp))
+        return StorageSample(stamp, {}, ())
+
+    def read_net(stamp: float) -> dict:
+        calls.append(("network", stamp))
+        return {}
+
+    monkeypatch.setattr(sampler._storage, "sample", read_disk)
+    monkeypatch.setattr(sampler._network, "sample", read_net)
+    monkeypatch.setattr(sampler._storage, "reset", lambda: calls.append(("storage reset", 0)))
+    monkeypatch.setattr(sampler._network, "reset", lambda: calls.append(("network reset", 0)))
+
+    light = sampler.sample(detailed=False)
+    assert light.storage is None and light.network is None and calls == []
+    detailed = sampler.sample()
+    assert detailed.storage is not None and detailed.storage.timestamp == 6.2
+    assert detailed.network == {} and detailed.network_timestamp == 6.1
+    sampler.reset()
+    assert calls == [("network", 6.1), ("storage", 6.2), ("storage reset", 0), ("network reset", 0)]

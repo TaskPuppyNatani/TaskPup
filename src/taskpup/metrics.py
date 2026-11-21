@@ -8,6 +8,8 @@ import time
 import psutil
 
 from taskpup.gpu import GpuSample, discover
+from taskpup.network import InterfaceSample, NetworkSampler
+from taskpup.storage import StorageSample, StorageSampler
 
 
 PROC = Path("/proc")
@@ -51,6 +53,9 @@ class SystemSample:
     memory: MemorySample | None
     swap: SwapSample | None
     gpus: tuple[GpuSample, ...] = ()
+    storage: StorageSample | None = None
+    network: dict[str, InterfaceSample] | None = None
+    network_timestamp: float | None = None
 
 
 _CpuTimes = tuple[int, ...]
@@ -91,6 +96,8 @@ class SystemSampler:
 
     def __init__(self) -> None:
         self._gpus = None
+        self._storage = StorageSampler()
+        self._network = NetworkSampler()
         self._previous_cpu: _CpuTimes | None = None
         self._previous_logical: dict[int, _CpuTimes] = {}
         self._previous_cpu_ids: frozenset[int] = frozenset()
@@ -102,12 +109,14 @@ class SystemSampler:
         self._physical_cores: int | None = None
 
     def reset(self) -> None:
-        """Clear CPU and swap activity baselines."""
+        """Clear delta baselines after a monitoring pause."""
         self._previous_cpu = None
         self._previous_logical.clear()
         self._previous_cpu_ids = frozenset()
         self._previous_swap = None
         self._previous_swap_time = None
+        self._storage.reset()
+        self._network.reset()
 
     def sample(self, *, detailed: bool = True) -> SystemSample:
         timestamp = time.monotonic()
@@ -119,12 +128,26 @@ class SystemSampler:
 
         frequency: float | None = None
         temperature: float | None = None
+        storage = None
+        network = None
+        network_timestamp = None
+        gpus = ()
         if detailed:
             self._discover_static_cpu()
             frequency = self._read_frequency()
             temperature = self._read_temperature()
             if self._gpus is None:
                 self._gpus = discover()
+            gpus = tuple(gpu.sample() for gpu in self._gpus)
+            try:
+                network_timestamp = time.monotonic()
+                network = self._network.sample(network_timestamp)
+            except OSError:
+                self._network.reset()
+            try:
+                storage = self._storage.sample(time.monotonic())
+            except OSError:
+                self._storage.reset()
 
         return SystemSample(
             timestamp=timestamp,
@@ -138,7 +161,10 @@ class SystemSampler:
             uptime_s=uptime,
             memory=memory,
             swap=swap,
-            gpus=tuple(gpu.sample() for gpu in self._gpus) if detailed and self._gpus is not None else (),
+            gpus=gpus,
+            storage=storage,
+            network=network,
+            network_timestamp=network_timestamp,
         )
 
     @staticmethod

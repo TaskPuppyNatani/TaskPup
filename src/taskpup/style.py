@@ -35,10 +35,10 @@ def apply_style(app: QApplication) -> None:
         QLabel#count, QLabel#metricTitle { color: #c4bdcf; }
         QTabBar#mainNavigation::tab {
             background: #211e28; color: #c9c0d4; border-bottom: 2px solid #40354d;
-            padding: 6px 16px; margin-right: 3px;
+            padding: 6px 16px; margin-right: 3px; font-weight: 600;
         }
         QTabBar#mainNavigation::tab:selected {
-            background: #30243e; color: #f3e7ff; border-bottom-color: #cb94ff; font-weight: 700;
+            background: #30243e; color: #f3e7ff; border-bottom-color: #cb94ff;
         }
         QTabBar#mainNavigation::tab:hover { color: #f3e7ff; }
         QFrame#performancePanel { background: #201e27; border: 1px solid #373142; border-radius: 8px; }
@@ -64,9 +64,16 @@ def apply_style(app: QApplication) -> None:
         QPushButton:pressed { background: #473456; }
         QPushButton:disabled { background: #231f2a; border-color: #3a3344; }
         QPushButton:checked { background: #30243e; border-color: #9b6cc4; }
-        QPushButton#resourceCard { background: #222029; border-color: #3c3448; min-height: 94px; padding: 0; }
-        QPushButton#resourceCard:hover { background: #2b2534; border-color: #765989; }
-        QPushButton#resourceCard:checked { background: #30243d; border-color: #b27bdf; }
+        QPushButton#resourceCard, QPushButton#transferCard {
+            background: #222029; border-color: #3c3448; min-height: 94px; padding: 0;
+        }
+        QPushButton#transferCard { min-height: 128px; }
+        QPushButton#resourceCard:hover, QPushButton#transferCard:hover {
+            background: #2b2534; border-color: #765989;
+        }
+        QPushButton#resourceCard:checked, QPushButton#transferCard:checked {
+            background: #30243d; border-color: #b27bdf;
+        }
         QPushButton#primary { background: #d0a0ff; color: #20132e; border-color: #d0a0ff; font-weight: 700; }
         QPushButton#primary:hover { background: #e1beff; }
         QPushButton#danger { color: #ffc1cd; border-color: #8a5062; background: #38252e; }

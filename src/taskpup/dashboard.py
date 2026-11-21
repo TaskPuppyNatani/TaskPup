@@ -1,20 +1,24 @@
 """Performance pages and their in-memory monitoring history."""
 
-from dataclasses import dataclass, field
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
 import time
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QResizeEvent, QShowEvent
 from PySide6.QtWidgets import (
-    QButtonGroup, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton,
+    QAbstractButton, QButtonGroup, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton,
     QScrollArea, QStackedWidget, QVBoxLayout, QWidget,
 )
 
-from taskpup.graphs import History, HistoryGraph
+from taskpup.graphs import History, HistoryGraph, rate_text
 from taskpup.metrics import SystemSample
 from taskpup.gpu import GpuSample
 from taskpup.model import memory_text
+from taskpup.network import InterfaceSample
 from taskpup.settings import Settings
+from taskpup.storage import DiskSample, Filesystem
+from taskpup.transfers import READ_COLOR, WRITE_COLOR, TransferPage, TransferSample, transfer_rates
 
 HISTORY_OPTIONS = {30: "30 seconds", 60: "60 seconds", 300: "5 minutes", 900: "15 minutes"}
 INTERVAL_OPTIONS = {1: "1 second", 2: "2 seconds", 5: "5 seconds"}
@@ -72,7 +76,7 @@ def uptime(value: float | None) -> str:
 
 
 class ResourceCard(QPushButton):
-    def __init__(self, name: str, color: str) -> None:
+    def __init__(self, name: str, color: str, graph: HistoryGraph | None = None) -> None:
         super().__init__()
         self.setObjectName("resourceCard")
         self.setCheckable(True)
@@ -81,8 +85,9 @@ class ResourceCard(QPushButton):
         layout.setContentsMargins(11, 8, 11, 9)
         layout.setSpacing(3)
         heading = QHBoxLayout()
-        title = QLabel(name)
+        title = self.title_label = QLabel(name)
         title.setObjectName("resourceName")
+        title.setTextFormat(Qt.TextFormat.PlainText)
         self.value = QLabel("—")
         self.value.setStyleSheet(f"color: {color}; font-weight: 700;")
         heading.addWidget(title)
@@ -92,7 +97,7 @@ class ResourceCard(QPushButton):
         self.info = QLabel()
         self.info.setObjectName("performanceMuted")
         layout.addWidget(self.info)
-        self.graph = HistoryGraph(color, compact=True)
+        self.graph = graph if graph is not None else HistoryGraph(color, compact=True)
         self.graph.setFixedHeight(34)
         layout.addWidget(self.graph)
         for child in (title, self.value, self.info, self.graph):
@@ -165,6 +170,139 @@ class _GpuView:
     capabilities: set[str] = field(default_factory=set)
 
 
+@dataclass(slots=True)
+class _TransferView:
+    card: ResourceCard
+    metadata: TransferSample
+    reading: TransferSample | None = None
+    histories: tuple[History, History] = field(default_factory=lambda: (History(), History()))
+
+
+class _TransferSidebar(QWidget):
+    def __init__(self, group: QButtonGroup, *, storage: bool, show_auxiliary: bool = False) -> None:
+        super().__init__()
+        self.group = group
+        self.storage = storage
+        self.views: dict[str, _TransferView] = {}
+        self.filesystems: tuple[Filesystem, ...] | None = None
+        self.anchor: float | None = None
+        self.page = TransferPage(storage=storage)
+        self.box = QVBoxLayout(self)
+        self.box.setContentsMargins(0, 4, 0, 0)
+        self.box.setSpacing(7)
+        heading = QLabel("Storage" if storage else "Network")
+        heading.setObjectName("resourceName")
+        self.box.addWidget(heading)
+        self.mounts_button: QPushButton | None = None
+        self.show_auxiliary: QCheckBox | None = None
+        if storage:
+            button = QPushButton("Mounted filesystems")
+            button.setCheckable(True)
+            self.group.addButton(button)
+            self.box.addWidget(button)
+            self.mounts_button = button
+        else:
+            option = QCheckBox("Show loopback and virtual")
+            option.setToolTip("Include loopback and auxiliary virtual interfaces")
+            option.setChecked(show_auxiliary)
+            option.toggled.connect(self.update_visibility)
+            self.box.addWidget(option)
+            self.show_auxiliary = option
+        self.hide()
+
+    def update_visibility(self) -> None:
+        show = self.show_auxiliary is not None and self.show_auxiliary.isChecked()
+        for view in self.views.values():
+            auxiliary = isinstance(view.metadata, InterfaceSample) and view.metadata.auxiliary
+            view.card.setVisible(show or not auxiliary)
+
+    def record(self, readings: Mapping[str, TransferSample] | None, timestamp: float) -> None:
+        self.anchor = timestamp
+        if readings is not None:
+            for identity in self.views.keys() - readings.keys():
+                view = self.views.pop(identity)
+                self.group.removeButton(view.card)
+                self.box.removeWidget(view.card)
+                view.card.hide()
+                view.card.deleteLater()
+            for identity, sample in readings.items():
+                if identity in self.views:
+                    continue
+                graph = HistoryGraph(
+                    READ_COLOR, compact=True, maximum=None, unit="B/s",
+                    fill=False, secondary_color=WRITE_COLOR,
+                )
+                card = ResourceCard(sample.name, READ_COLOR, graph)
+                card.setObjectName("transferCard")
+                card.info.setWordWrap(True)
+                card.info.setTextFormat(Qt.TextFormat.PlainText)
+                self.views[identity] = _TransferView(card, sample)
+                self.group.addButton(card)
+                self.box.addWidget(card)
+            self.setVisible(bool(self.views) or bool(self.filesystems))
+        for identity, view in self.views.items():
+            reading = readings.get(identity) if readings is not None else None
+            view.reading = reading
+            if reading is not None:
+                previous = view.metadata
+                if (
+                    isinstance(reading, DiskSample) and reading.capacity is None
+                    and isinstance(previous, DiskSample) and previous.capacity is not None
+                ):
+                    view.metadata = replace(reading, capacity=previous.capacity)
+                else:
+                    view.metadata = reading
+            for history, rate in zip(view.histories, transfer_rates(reading), strict=True):
+                history.append(timestamp, rate)
+        if readings is not None:
+            self.update_visibility()
+
+    def gap(self, timestamp: float) -> None:
+        for view in self.views.values():
+            for history in view.histories:
+                history.append(timestamp, None)
+
+    def invalidate(self, timestamp: float) -> None:
+        self.anchor = timestamp
+        self.filesystems = None
+        for view in self.views.values():
+            view.reading = None
+
+    def owns(self, button: QAbstractButton | None) -> bool:
+        return button is not None and (
+            button is self.mounts_button or any(button is view.card for view in self.views.values())
+        )
+
+    def update_cards_and_page(self, active: QAbstractButton | None, duration: int) -> None:
+        for view in self.views.values():
+            if view.card.isHidden():
+                continue
+            left, right = (rate_text(rate) if rate is not None else "—" for rate in transfer_rates(view.reading))
+            reading = view.reading
+            if isinstance(view.metadata, DiskSample):
+                activity = reading.activity if isinstance(reading, DiskSample) else None
+                value = f"{activity:.0f}%" if activity is not None else ""
+                info = f"{view.metadata.kind}\nRead {left}\nWrite {right}"
+                if activity is not None:
+                    view.card.value.setToolTip("Device active time")
+            else:
+                state = reading.status if isinstance(reading, InterfaceSample) else UNAVAILABLE
+                value = ""
+                info = f"{view.metadata.kind} · {state}\nReceive {left}\nTransmit {right}"
+            view.card.value.setText(value)
+            view.card.title_label.setText(view.metadata.name)
+            view.card.setAccessibleName(view.metadata.name)
+            view.card.info.setText(info)
+            view.card.setAccessibleDescription(info.replace("\n", ". ") + (f". Active time {value}" if value else ""))
+            view.card.graph.set_series(
+                view.histories[0].samples, self.anchor, duration, secondary=view.histories[1].samples,
+            )
+            if active is view.card:
+                self.page.display(view.metadata, reading, view.histories, self.anchor, duration)
+        if active is not None and active is self.mounts_button:
+            self.page.display_filesystems(self.filesystems)
+
+
 class PerformanceDashboard(QWidget):
     monitoring_changed = Signal(int, bool)
 
@@ -207,9 +345,11 @@ class PerformanceDashboard(QWidget):
         sidebar_scroll = QScrollArea()
         sidebar_scroll.setWidgetResizable(True)
         sidebar_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        sidebar_scroll.setFixedWidth(205)
+        sidebar_scroll.setFixedWidth(218)
+        sidebar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        sidebar_scroll.setAccessibleName("Performance resources")
+        self.sidebar_scroll = sidebar_scroll
         sidebar = QWidget()
-        sidebar_scroll.setWidget(sidebar)
         resources = QVBoxLayout(sidebar)
         resources.setContentsMargins(0, 0, 0, 0)
         resources.setSpacing(8)
@@ -220,7 +360,14 @@ class PerformanceDashboard(QWidget):
             group.addButton(card, index)
             resources.addWidget(card)
         self.cards[self.resource].setChecked(True)
+        self.storage = _TransferSidebar(group, storage=True)
+        self.network = _TransferSidebar(
+            group, storage=False, show_auxiliary=settings.option("performance/show_auxiliary", False),
+        )
+        resources.addWidget(self.storage)
+        resources.addWidget(self.network)
         resources.addStretch()
+        sidebar_scroll.setWidget(sidebar)
         body.addWidget(sidebar_scroll)
 
         self.details = QStackedWidget()
@@ -249,7 +396,9 @@ class PerformanceDashboard(QWidget):
         body.addWidget(self.details, 1)
         layout.addLayout(body, 1)
 
-        group.idClicked.connect(self.select_resource)
+        group.buttonClicked.connect(self.select_card)
+        assert self.network.show_auxiliary is not None
+        self.network.show_auxiliary.toggled.connect(self.update_charts)
         self.duration_box.currentIndexChanged.connect(self.update_charts)
         self.interval_box.currentIndexChanged.connect(self.configure)
         self.pause.toggled.connect(self.configure)
@@ -349,9 +498,11 @@ class PerformanceDashboard(QWidget):
         self.monitoring_changed.emit(self.interval * 1000, not paused)
 
     def save(self) -> None:
+        auxiliary = self.network.show_auxiliary
         self.settings.save_performance(
             duration=self.duration, interval=self.interval, paused=self.pause.isChecked(),
             resource=self.resource if self.resource < 3 else 0, logical=self.logical_mode.isChecked(),
+            show_auxiliary=auxiliary.isChecked() if auxiliary is not None else False,
         )
 
     def select_resource(self, resource: int) -> None:
@@ -359,16 +510,31 @@ class PerformanceDashboard(QWidget):
         self.details.setCurrentIndex(resource)
         self.update_charts()
 
+    def select_card(self, button: QAbstractButton) -> None:
+        resource = self.group.id(button)
+        if resource < 0:
+            for section in (self.storage, self.network):
+                if section.owns(button):
+                    resource = self.details.indexOf(section.page)
+                    section.page.verticalScrollBar().setValue(0)
+                    break
+        if resource >= 0:
+            self.select_resource(resource)
+
     def mark_gap(self, timestamp: float) -> None:
         for history in (*self.histories, *self.logical_histories.values(),
                         *(history for view in self.gpu_views.values() for history in (view.usage, view.memory))):
             history.append(timestamp, None)
+        self.storage.gap(timestamp)
+        self.network.gap(timestamp)
 
     def record_failure(self, error: str) -> None:
         if self.pause.isChecked():
             return
         self.anchor = time.monotonic()
         self.mark_gap(self.anchor)
+        for section in (self.storage, self.network):
+            section.invalidate(self.anchor)
         self.latest = None
         self.show_state("Sample unavailable")
         self.state.setToolTip(error)
@@ -401,6 +567,16 @@ class PerformanceDashboard(QWidget):
                 )
             view.usage.append(sample.timestamp, gpu.utilization if gpu else None)
             view.memory.append(sample.timestamp, gpu.memory_percent if gpu else None)
+        storage = sample.storage
+        self.storage.filesystems = storage.filesystems if storage is not None and storage.filesystems_available else None
+        self.storage.record(
+            storage.devices if storage is not None else None, storage.timestamp if storage is not None else sample.timestamp,
+        )
+        network_time = sample.network_timestamp if sample.network_timestamp is not None else sample.timestamp
+        self.network.record(sample.network, network_time)
+        for section in (self.storage, self.network):
+            if not section.isHidden() and self.details.indexOf(section.page) < 0:
+                self.details.addWidget(section.page)
         if sample.logical_percent:
             for cpu in self.logical_histories.keys() - sample.logical_percent.keys():
                 del self.logical_histories[cpu]
@@ -445,6 +621,16 @@ class PerformanceDashboard(QWidget):
         gpu_samples = {gpu.identity: gpu for gpu in sample.gpus} if sample else {}
         for identity, view in self.gpu_views.items():
             self.update_gpu(view, gpu_samples.get(identity))
+        clicked = self.group.checkedButton()
+        for section in (self.storage, self.network):
+            if self.details.currentWidget() is section.page and (
+                section.isHidden() or clicked is None or clicked.isHidden() or not section.owns(clicked)
+            ):
+                self.cards[0].setChecked(True)
+                self.resource = index = 0
+                self.details.setCurrentIndex(0)
+                clicked = self.cards[0]
+            section.update_cards_and_page(clicked, self.duration)
         if index >= 3:
             return
         if index == 0 and self.logical_mode.isChecked():
@@ -478,20 +664,19 @@ class PerformanceDashboard(QWidget):
             label.setText(value)
 
     def add_gpu(self, gpu: GpuSample) -> None:
-        index = len(self.cards)
-        card = ResourceCard(f'GPU {index - 3}', COLORS[0])
+        gpu_number = len(self.gpu_views)
+        card = ResourceCard(f'GPU {gpu_number}', COLORS[0])
         card.setStyleSheet('QPushButton#resourceCard { min-height: 155px; }')
         card.info.setWordWrap(True)
         card.info.setTextFormat(Qt.TextFormat.PlainText)
+        self.resources.insertWidget(len(self.cards), card)
         self.cards.append(card)
-        self.group.addButton(card, index)
-        self.resources.insertWidget(self.resources.count() - 1, card)
         panel = QFrame()
         panel.setObjectName('performancePanel')
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(13, 10, 13, 11)
         layout.setSpacing(7)
-        title = QLabel(f'GPU {index - 3}  ·  {gpu.name}')
+        title = QLabel(f'GPU {gpu_number}  ·  {gpu.name}')
         title.setTextFormat(Qt.TextFormat.PlainText)
         title.setWordWrap(True)
         title.setObjectName('performanceTitle')
@@ -528,7 +713,8 @@ class PerformanceDashboard(QWidget):
         area.setWidgetResizable(True)
         area.setFrameShape(QFrame.Shape.NoFrame)
         area.setWidget(panel)
-        self.details.addWidget(area)
+        index = self.details.addWidget(area)
+        self.group.addButton(card, index)
         self.gpu_views[gpu.identity] = _GpuView(card, gpu.name, plots, stats, footer)
 
     def update_gpu(self, view: _GpuView, gpu: GpuSample | None) -> None:

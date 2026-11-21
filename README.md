@@ -2,7 +2,7 @@
 
 TaskPup is a native Linux process manager built with Python, Qt 6, and psutil. Phase 1 targets Linux Mint Debian Edition 7 with Cinnamon on X11.
 
-Phase 1 covers process discovery, inspection, and management with live system summaries. Phase 2 adds a Performance dashboard for CPU, memory, swap, and GPU monitoring. Phase 2B GPU monitoring has been implemented and verified on the laptop, with user-confirmed acceptance on the desktop.
+Phase 1 covers process discovery, inspection, and management with live system summaries. Phase 2 adds a Performance dashboard for CPU, memory, swap, GPU, storage, and network monitoring. Phase 2A was verified on desktop and laptop hardware. Phase 2B GPU telemetry was checked on the laptop Radeon R5, with user-confirmed acceptance for the desktop RX 7900 XTX and Granite Ridge integrated Radeon. Phase 2C storage, filesystem, and network pages were directly checked on an LMDE 7 Cinnamon/X11 desktop and accepted by the user. These checks cover the listed environments and hardware; they do not establish universal driver or filesystem support.
 
 ## Install and run
 
@@ -34,7 +34,7 @@ The terminal launcher is the verified startup path on Cinnamon/X11. TaskPup supp
 
 ## Monitor performance
 
-- Open **Performance** and select **CPU**, **Memory**, **Swap**, or a detected GPU. **Per logical CPU** switches between the aggregate CPU chart and a chart for each logical CPU.
+- Open **Performance** and select **CPU**, **Memory**, **Swap**, a detected GPU, a storage device, or a network interface. **Per logical CPU** switches between the aggregate CPU chart and a chart for each logical CPU. Scroll the sidebar to reach additional resources.
 - Choose a history window of 30 seconds, 60 seconds, 5 minutes, or 15 minutes, and a sampling interval of 1, 2, or 5 seconds. The defaults are 60 seconds and 1 second. Hover over a chart for historical readings.
 - **Pause** holds the performance history. Process-table auto-refresh and manual refresh have independent controls. Process and thread totals on the CPU page reflect the most recent process scan.
 - RAM used is total physical memory minus available memory. The cache and buffer figures are informational and can overlap those totals. Swap activity rates use Linux counter deltas over the measured sample interval.
@@ -42,6 +42,13 @@ The terminal launcher is the verified startup path on Cinnamon/X11. TaskPup supp
 - GPUs are discovered through Linux DRM. AMD `amdgpu` sysfs and hwmon provide utilization, driver memory pools, and available labeled sensors; capabilities vary by hardware and driver. Adaptive statistics and graphs show supported telemetry while keeping supported fields in place through temporary read failures. Laptop testing verified the integrated Wani Radeon R5/R6/R7. User testing confirmed the RX 7900 XTX and Granite Ridge integrated Radeon are detected independently and expose their available telemetry, including 24 GiB GPU memory on the dedicated card. This is hardware-specific acceptance, not universal GPU compatibility. Other drivers, including legacy `radeon`, are identified but detailed telemetry is not currently supported. Device names depend on the local PCI ID database. Discovery occurs when monitoring first starts; restart TaskPup to discover newly attached GPUs.
 - The GPU memory graph shows the driver's reported VRAM pool, which can be reserved system memory on integrated graphics and is not necessarily physically dedicated memory. GTT is shown separately as a driver allocation and limit; the limit is not system RAM consumption. These figures are not added together. AMD power readings may include CPU power on APUs. Unavailable or inaccessible metrics are shown as unavailable.
 - History is kept in memory and bounded to 15 minutes. Dashboard preferences are restored when TaskPup reopens.
+
+### Storage and network
+
+- **Storage** shows per-device read and write rates from Linux `/proc/diskstats` and identifies devices through sysfs. The sidebar lists whole drives and relevant mounted logical devices. Partition space appears in **Mounted filesystems**, and unused pseudo-devices are omitted. Device active time is the share of the sampling interval spent handling I/O. Capacity and device-scoped hwmon temperature depend on information exposed by the device and driver; SMART telemetry is not collected.
+- **Mounted filesystems** shows local filesystem capacity from Linux mount information and filesystem statistics. Related mounts use a representative mount point when their filesystem identity can be established. Filesystem usage is separate from block-device counters, including for Btrfs, partitions, and logical volumes. Remote and pseudo filesystems are omitted.
+- **Network** shows receive and transmit rates from Linux per-interface counters, with interface type and link state from Linux metadata and psutil. Local link speed, when exposed, describes the interface and is not its current throughput. **Show loopback and virtual** reveals auxiliary interfaces hidden by default. Each interface has its own readings. Traffic may be visible on both a bridge or virtual interface and an underlying link, so the per-interface readings should not be summed as an aggregate.
+- Throughput uses binary byte-per-second units. Rates resume after a new baseline is available, and a temporarily unavailable counter is shown as unavailable. Telemetry uses read-only Linux interfaces and reflects devices visible to the running user.
 
 ## Development checks
 

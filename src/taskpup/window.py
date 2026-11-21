@@ -108,6 +108,7 @@ class MainWindow(QMainWindow):
         self.navigation.setAccessibleName("TaskPup views")
         self.navigation.setExpanding(False)
         self.navigation.setDrawBase(False)
+        self.navigation.setUsesScrollButtons(False)
         self.navigation.addTab("Processes")
         self.navigation.addTab("Performance")
         layout.addWidget(self.navigation, alignment=Qt.AlignmentFlag.AlignLeft)
