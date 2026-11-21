@@ -2,7 +2,7 @@
 
 TaskPup is a native Linux process manager built with Python, Qt 6, and psutil. Phase 1 targets Linux Mint Debian Edition 7 with Cinnamon on X11.
 
-Phase 1 covers process discovery, inspection, and management with live system summaries. Phase 2 adds a Performance dashboard for CPU, memory, swap, and GPU monitoring. Phase 2B is in development; desktop GPU validation remains outstanding.
+Phase 1 covers process discovery, inspection, and management with live system summaries. Phase 2 adds a Performance dashboard for CPU, memory, swap, and GPU monitoring. Phase 2B GPU monitoring has been implemented and verified on the laptop, with user-confirmed acceptance on the desktop.
 
 ## Install and run
 
@@ -39,7 +39,7 @@ The terminal launcher is the verified startup path on Cinnamon/X11. TaskPup supp
 - **Pause** holds the performance history. Process-table auto-refresh and manual refresh have independent controls. Process and thread totals on the CPU page reflect the most recent process scan.
 - RAM used is total physical memory minus available memory. The cache and buffer figures are informational and can overlap those totals. Swap activity rates use Linux counter deltas over the measured sample interval.
 - CPU temperature, frequency, and topology depend on the system exposing reliable data. Unsupported readings and the first sample of a delta-based metric are shown as unavailable. Systems without configured swap have a capacity of zero and no utilization percentage.
-- GPUs are discovered through Linux DRM. AMD `amdgpu` sysfs and hwmon provide utilization, driver memory pools, and available labeled sensors; capabilities vary by hardware and driver. Other drivers, including legacy `radeon`, are identified but detailed telemetry is not currently supported. Device names depend on the local PCI ID database. Discovery occurs when monitoring first starts; restart TaskPup to discover newly attached GPUs.
+- GPUs are discovered through Linux DRM. AMD `amdgpu` sysfs and hwmon provide utilization, driver memory pools, and available labeled sensors; capabilities vary by hardware and driver. Adaptive statistics and graphs show supported telemetry while keeping supported fields in place through temporary read failures. Laptop testing verified the integrated Wani Radeon R5/R6/R7. User testing confirmed the RX 7900 XTX and Granite Ridge integrated Radeon are detected independently and expose their available telemetry, including 24 GiB GPU memory on the dedicated card. This is hardware-specific acceptance, not universal GPU compatibility. Other drivers, including legacy `radeon`, are identified but detailed telemetry is not currently supported. Device names depend on the local PCI ID database. Discovery occurs when monitoring first starts; restart TaskPup to discover newly attached GPUs.
 - The GPU memory graph shows the driver's reported VRAM pool, which can be reserved system memory on integrated graphics and is not necessarily physically dedicated memory. GTT is shown separately as a driver allocation and limit; the limit is not system RAM consumption. These figures are not added together. AMD power readings may include CPU power on APUs. Unavailable or inaccessible metrics are shown as unavailable.
 - History is kept in memory and bounded to 15 minutes. Dashboard preferences are restored when TaskPup reopens.
 
