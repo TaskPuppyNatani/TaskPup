@@ -434,6 +434,8 @@ class StorageSampler:
                 kind = "RAID"
             elif dm_name or name.startswith(("loop", "ram", "zram", "nbd")) or virtual_path or not has_device:
                 kind = "Logical"
+            elif name.startswith("sr") or _nonnegative_int(_read_text(path / "device" / "type")) == 5:
+                kind = "Optical drive"
             else:
                 path_parts = {part.lower() for part in path.parts}
                 transport = (_read_text(path / "device" / "transport") or "").lower()

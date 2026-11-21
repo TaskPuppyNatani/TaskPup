@@ -173,6 +173,20 @@ def test_discovers_whole_disk_for_mounted_partition_and_filesystem_capacity(
     )
 
 
+def test_scsi_optical_device_is_not_classified_as_sata_ssd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proc, sysfs, block = configure_roots(tmp_path, monkeypatch)
+    optical = add_block(sysfs, block, "sr0", 11, 0, model="DVD-ROM", rotational=0)
+    (optical / "device" / "type").write_text("5\n")
+    set_diskstats(proc, disk_line(11, 0, "sr0"))
+
+    sample = StorageSampler().sample(1.0)
+
+    assert len(sample.devices) == 1
+    assert next(iter(sample.devices.values())).kind == "Optical drive"
+
+
 def test_mounted_device_mapper_keeps_logical_card_and_physical_disk_separate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

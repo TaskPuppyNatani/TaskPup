@@ -64,6 +64,15 @@ def test_jsonl_export_has_independently_parseable_schema_versioned_records(tmp_p
     assert records[-1]["section"] == "Graphics"
 
 
+def test_byte_formatting_uses_binary_units_and_handles_boundaries() -> None:
+    assert report_render.format_bytes(0) == "0 B"
+    assert report_render.format_bytes(1023) == "1,023 B"
+    assert report_render.format_bytes(1024) == "1.00 KiB"
+    assert report_render.format_bytes(7_733_346_304) == "7.20 GiB"
+    assert report_render.format_bytes(128_035_676_160) == "119.24 GiB"
+    assert report_render.format_bytes(2**50) == "1.00 PiB"
+
+
 def test_html_export_is_standalone_and_escapes_system_text(tmp_path) -> None:
     destination = tmp_path / "diagnostic.html"
 
@@ -78,6 +87,40 @@ def test_html_export_is_standalone_and_escapes_system_text(tmp_path) -> None:
     assert "&lt;script&gt;alert(&#x27;x&#x27;)&lt;/script&gt;" in rendered
     assert "https://" not in rendered
     assert "Automated redaction may not catch every sensitive value" in rendered
+
+
+def test_nested_capacity_and_network_bytes_are_readable_but_jsonl_stays_exact() -> None:
+    data = snapshot()
+    data["sections"] = {
+        "memory": {"ram": {"total_bytes": 7_733_346_304},
+                   "swap": {"total_bytes": 8_589_930_496},
+                   "kernel_memory_details": {"Cached": 512_000}},
+        "graphics": {"devices": [{"memory_pools": {
+            "driver_reported_vram": {"used_bytes": 20_100_000_000, "total_bytes": 25_769_803_776},
+            "driver_reported_gtt": {"used_bytes": 1024, "total_bytes": 2048},
+        }}]},
+        "storage": {"devices": [{"capacity_bytes": 128_035_676_160}],
+                    "filesystems": [{"capacity": {"total_bytes": 128_035_676_160,
+                                                      "used_bytes": 64 * 1024**3,
+                                                      "available_bytes": 55 * 1024**3,
+                                                      "percent_used": 50}}]},
+        "network": {"interfaces": [{"counters": {"bytes_received": 7_733_346_304,
+                                                     "bytes_transmitted": 1024,
+                                                     "packets_received": 1500},
+                                      "rates": {"receive_bytes_per_second": 2048}}]},
+    }
+    markdown = report_render.render_markdown(data)
+    html = report_render.render_html(data)
+    assert "7.20 GiB" in markdown and "119.24 GiB" in markdown
+    assert "8.00 GiB" in markdown
+    assert "Driver Reported VRAM: Used Bytes: 18.72 GiB" in markdown
+    assert "Bytes Received: 7.20 GiB" in markdown and "Receive Bytes Per Second: 2.00 KiB/s" in markdown
+    assert "Packets Received: 1500" in markdown
+    assert "7.20 GiB" in html and "119.24 GiB" in html
+    assert '"used_bytes": 20100000000' not in markdown + html
+    records = [json.loads(line) for line in report_render.render_jsonl(data).splitlines()]
+    graphics = next(record["data"] for record in records if record.get("section") == "graphics")
+    assert graphics["devices"][0]["memory_pools"]["driver_reported_vram"]["used_bytes"] == 20_100_000_000
 
 
 def test_internal_section_names_are_displayed_as_readable_labels() -> None:

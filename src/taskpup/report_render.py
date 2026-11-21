@@ -124,13 +124,40 @@ def _humanize_label(value: str) -> str:
     )
 
 
-def _display_value(value: Any) -> str:
+def format_bytes(value: int) -> str:
+    """Format a byte quantity using the binary units shown in TaskPup."""
+    amount = float(value)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB", "PiB"):
+        if amount < 1024 or unit == "PiB":
+            return f"{amount:,.0f} {unit}" if unit == "B" else f"{amount:,.2f} {unit}"
+        amount /= 1024
+    return f"{amount:,.2f} PiB"
+
+
+def _byte_field(key: str) -> bool:
+    normalized = key.casefold()
+    return normalized.endswith("_bytes") or normalized in {
+        "bytes_received", "bytes_transmitted", "receive_bytes_per_second", "transmit_bytes_per_second",
+    }
+
+
+def _display_value(value: Any, key: str = "", parent: str = "") -> str:
     if value is None:
         return "Not available"
     if isinstance(value, bool):
         return "Yes" if value else "No"
-    if isinstance(value, (dict, list)):
-        return _json_dumps(value)
+    if isinstance(value, int) and (
+        _byte_field(key) or (parent == "kernel_memory_details" and key.casefold() != "hugepages_total")
+    ):
+        suffix = "/s" if key.casefold().endswith("_per_second") else ""
+        return format_bytes(value) + suffix
+    if isinstance(value, dict):
+        return "; ".join(
+            f"{_humanize_label(child_key)}: {_display_value(child, child_key, key.casefold())}"
+            for child_key, child in value.items()
+        ) or "No details"
+    if isinstance(value, list):
+        return "; ".join(_display_value(item) for item in value) or "No entries"
     return str(value)
 
 
@@ -158,7 +185,7 @@ def _markdown_section_tables(data: Any) -> list[str]:
     simple_rows: list[tuple[str, str]] = []
     record_tables: list[tuple[str, list[dict[str, Any]]]] = []
 
-    def visit(value: Any, prefix: str = "") -> None:
+    def visit(value: Any, prefix: str = "", parent_key: str = "") -> None:
         if isinstance(value, dict):
             if not value:
                 simple_rows.append((prefix or "Details", "No details"))
@@ -166,14 +193,14 @@ def _markdown_section_tables(data: Any) -> list[str]:
             for key, child in value.items():
                 label = f"{prefix} / {_humanize_label(key)}" if prefix else _humanize_label(key)
                 if isinstance(child, dict):
-                    visit(child, label)
+                    visit(child, label, key)
                 elif isinstance(child, list) and (not child or all(isinstance(item, dict) for item in child)):
                     if child:
                         record_tables.append((label, child))
                     else:
                         simple_rows.append((label, "No entries"))
                 else:
-                    simple_rows.append((label, _display_value(child)))
+                    simple_rows.append((label, _display_value(child, key, parent_key.casefold())))
             return
         if isinstance(value, list) and value and all(isinstance(item, dict) for item in value):
             record_tables.append((prefix or "Records", value))
@@ -193,7 +220,7 @@ def _markdown_section_tables(data: Any) -> list[str]:
         lines.extend(("", f"**{_clean_inline_text(title)}**", ""))
         if columns:
             rows = [
-                [str(index), *[_display_value(record.get(column)) for column in columns]]
+                [str(index), *[_display_value(record.get(column), column) for column in columns]]
                 for index, record in enumerate(records, 1)
             ]
             lines.extend(_markdown_table(["#", *columns], rows))
@@ -287,7 +314,7 @@ def render_html(snapshot: dict[str, Any]) -> str:
         simple_rows: list[tuple[str, str]] = []
         record_tables: list[tuple[str, list[dict[str, Any]]]] = []
 
-        def visit(value: Any, prefix: str = "") -> None:
+        def visit(value: Any, prefix: str = "", parent_key: str = "") -> None:
             if isinstance(value, dict):
                 if not value:
                     simple_rows.append((prefix or "Details", "No details"))
@@ -295,14 +322,14 @@ def render_html(snapshot: dict[str, Any]) -> str:
                 for key, child in value.items():
                     label = f"{prefix} / {_humanize_label(key)}" if prefix else _humanize_label(key)
                     if isinstance(child, dict):
-                        visit(child, label)
+                        visit(child, label, key)
                     elif isinstance(child, list) and (not child or all(isinstance(item, dict) for item in child)):
                         if child:
                             record_tables.append((label, child))
                         else:
                             simple_rows.append((label, "No entries"))
                     else:
-                        simple_rows.append((label, _display_value(child)))
+                        simple_rows.append((label, _display_value(child, key, parent_key.casefold())))
                 return
             if isinstance(value, list) and value and all(isinstance(item, dict) for item in value):
                 record_tables.append((prefix or "Records", value))
@@ -322,7 +349,7 @@ def render_html(snapshot: dict[str, Any]) -> str:
             parts.append(f"<h3>{_html_escape(title)}</h3>")
             if columns:
                 rows = [
-                    [str(index), *[_display_value(record.get(column)) for column in columns]]
+                    [str(index), *[_display_value(record.get(column), column) for column in columns]]
                     for index, record in enumerate(records, 1)
                 ]
                 parts.append(make_table(["#", *columns], rows))

@@ -558,6 +558,38 @@ def test_branding_layout_at_normal_and_minimum_width(window: MainWindow) -> None
         assert run.geometry().right() == window.width() - 21
 
 
+def test_report_export_header_button_opens_dialog_and_fits_at_minimum_width(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    opened = []
+
+    class DialogProbe:
+        def __init__(self, parent) -> None:
+            assert parent is window
+
+        def exec(self) -> None:
+            opened.append(True)
+
+    monkeypatch.setattr("taskpup.window.ReportDialog", DialogProbe)
+    report = window.report_button
+    run = window.findChild(QPushButton, "primary")
+    assert run is not None
+    assert report.isVisible() and report.accessibleName() == "Export system diagnostic report"
+    assert report.objectName() == "secondary"
+    assert window.menuWidget() is None
+
+    for width in (1210, window.minimumWidth()):
+        window.resize(width, 550)
+        QApplication.processEvents()
+        assert report.isVisible() and run.isVisible()
+        assert report.geometry().right() < run.geometry().left()
+        assert report.height() == run.height()
+        assert run.geometry().right() == window.width() - 21
+
+    report.click()
+    assert opened == [True]
+
+
 def test_run_task_passes_literal_arguments(qt_app: QApplication, tmp_path: Path) -> None:
     marker = tmp_path / "task output.txt"
     code = "from pathlib import Path; import sys; Path(sys.argv[1]).write_text(sys.argv[2])"

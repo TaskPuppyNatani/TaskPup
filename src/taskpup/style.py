@@ -76,6 +76,8 @@ def apply_style(app: QApplication) -> None:
         }
         QPushButton#primary { background: #d0a0ff; color: #20132e; border-color: #d0a0ff; font-weight: 700; }
         QPushButton#primary:hover { background: #e1beff; }
+        QPushButton#secondary { background: #30243e; color: #eadcff; border-color: #765989; font-weight: 600; }
+        QPushButton#secondary:hover { background: #3b2b4b; border-color: #b27bdf; }
         QPushButton#danger { color: #ffc1cd; border-color: #8a5062; background: #38252e; }
         QPushButton#danger:hover { background: #503040; }
         QPushButton#danger:disabled { color: #ad9aa2; border-color: #46343c; background: #251f26; }

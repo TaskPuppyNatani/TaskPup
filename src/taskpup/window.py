@@ -66,8 +66,6 @@ class MainWindow(QMainWindow):
         self.refresh = RefreshController(self)
 
         self.setWindowTitle("TaskPup")
-        report_action = self.menuBar().addAction("Export System Report…")
-        report_action.triggered.connect(self.export_report)
         self.resize(1210, 740)
         self.setMinimumSize(770, 470)
         body = QWidget()
@@ -101,6 +99,10 @@ class MainWindow(QMainWindow):
         brand_row.addLayout(brand_text)
         brand_row.setAlignment(brand_text, Qt.AlignmentFlag.AlignVCenter)
         brand_row.addStretch()
+        self.report_button = QPushButton("Export System Report…")
+        self.report_button.setObjectName("secondary")
+        self.report_button.setAccessibleName("Export system diagnostic report")
+        brand_row.addWidget(self.report_button, alignment=Qt.AlignmentFlag.AlignVCenter)
         run = QPushButton("Run new task…")
         run.setObjectName("primary")
         brand_row.addWidget(run, alignment=Qt.AlignmentFlag.AlignVCenter)
@@ -212,6 +214,7 @@ class MainWindow(QMainWindow):
         self.view.collapsed.connect(lambda index: self.remember_expansion(index, collapsed=True))
         self.view.expanded.connect(lambda index: self.remember_expansion(index, collapsed=False))
 
+        self.report_button.clicked.connect(self.export_report)
         run.clicked.connect(self.run_task)
         self.stop_button.clicked.connect(self.end_selected)
         refresh_button.clicked.connect(self.refresh.manual)
