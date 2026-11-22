@@ -1,0 +1,17 @@
+#!/bin/sh
+set -eu
+
+appdir="${APPDIR:-$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)}"
+
+if [ -n "${XDG_DATA_DIRS:-}" ]; then
+    XDG_DATA_DIRS="$appdir/usr/share:$XDG_DATA_DIRS"
+else
+    XDG_DATA_DIRS="$appdir/usr/share:/usr/local/share:/usr/share"
+fi
+export XDG_DATA_DIRS
+
+# Select the desktop-facing icon without changing the in-app artwork.
+TASKPUP_APPIMAGE_ICON="$appdir/usr/share/icons/hicolor/256x256/apps/taskpup.png"
+export TASKPUP_APPIMAGE_ICON
+
+exec "$appdir/usr/lib/taskpup/taskpup.bin" "$@"
