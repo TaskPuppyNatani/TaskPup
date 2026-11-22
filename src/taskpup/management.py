@@ -89,11 +89,7 @@ def send_signal(identity: Identity, sig: signal.Signals) -> None:
 
 
 def set_priority(identity: Identity, nice: int) -> None:
-    if not -20 <= nice <= 19:
-        raise ProcessActionError("Nice must be between −20 and 19.")
-    with process_handle(identity) as fd:
-        os.setpriority(os.PRIO_PROCESS, identity.pid, nice)
-        ensure_alive(fd)
+    raise ProcessActionError("Priority and CPU affinity changes are disabled for process-identity safety.")
 
 
 def get_affinity(identity: Identity) -> set[int]:
@@ -104,16 +100,7 @@ def get_affinity(identity: Identity) -> set[int]:
 
 
 def set_affinity(identity: Identity, cpus: set[int]) -> None:
-    if not cpus or min(cpus) < 0:
-        raise ProcessActionError("Select at least one valid CPU.")
-    with process_handle(identity) as fd:
-        os.sched_setaffinity(identity.pid, cpus)
-        ensure_alive(fd)
-        applied = os.sched_getaffinity(identity.pid)
-        ensure_alive(fd)
-        if applied != cpus:
-            shown = ", ".join(str(cpu) for cpu in sorted(applied))
-            raise ProcessActionError(f"Linux restricted the applied affinity to CPUs {shown}.")
+    raise ProcessActionError("Priority and CPU affinity changes are disabled for process-identity safety.")
 
 
 @dataclass(frozen=True, slots=True)

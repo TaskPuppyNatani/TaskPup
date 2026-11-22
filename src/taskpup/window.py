@@ -414,8 +414,6 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         add("Suspend…", self.suspend, mutable and row.stat.state != "T")
         add("Resume", self.resume, mutable and row.stat.state == "T")
-        add("Change priority…", self.priority, mutable)
-        add("Change CPU affinity…", self.affinity, mutable)
         menu.addSeparator()
         add("End task…", lambda target: self.terminate(target, force=False), mutable)
         add("End process tree…", lambda target: self.terminate_tree(target, force=False), mutable)
@@ -476,26 +474,6 @@ class MainWindow(QMainWindow):
 
     def resume(self, row: ProcessRow) -> None:
         self.do_action(lambda: management.send_signal(row.identity, signal.SIGCONT), f"Resumed PID {row.identity.pid}")
-
-    def priority(self, row: ProcessRow) -> None:
-        def action() -> None:
-            stat = management.check_identity(row.identity, mutable=True)
-            value = dialogs.choose_priority(self, row, stat.nice)
-            if value is not None and value != stat.nice:
-                management.set_priority(row.identity, value)
-                self.statusBar().showMessage(f"Nice set to {value} for PID {row.identity.pid}", 4500)
-
-        self.do_action(action)
-
-    def affinity(self, row: ProcessRow) -> None:
-        def action() -> None:
-            current = management.get_affinity(row.identity)
-            cpus = dialogs.choose_affinity(self, row, current)
-            if cpus is not None and cpus != current:
-                management.set_affinity(row.identity, cpus)
-                self.statusBar().showMessage(f"CPU affinity updated for PID {row.identity.pid}", 4500)
-
-        self.do_action(action)
 
     def properties(self, row: ProcessRow) -> None:
         def action() -> None:

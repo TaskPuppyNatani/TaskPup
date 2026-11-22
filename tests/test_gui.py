@@ -11,7 +11,7 @@ import time
 import pytest
 from PySide6.QtCore import QEventLoop, QItemSelectionModel, QObject, QPoint, QSettings, Qt, QTimer
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QLabel, QPushButton
+from PySide6.QtWidgets import QApplication, QLabel, QMenu, QPushButton
 
 from taskpup import app, dialogs, management
 from taskpup.metrics import MemorySample, SwapSample, SystemSample, SystemSampler
@@ -62,6 +62,26 @@ def row(pid: int, name: str, *, parent: int = 0, uid: int = 1000, start: int = 1
 
 def snapshot(*rows: ProcessRow) -> Snapshot:
     return Snapshot(rows, Resources(20.5, 43.3, None))
+
+
+def test_context_menu_omits_scheduling_mutations(window: MainWindow) -> None:
+    window.refresh.stop()
+    target = row(311, "editor", uid=os.getuid())
+    window.apply_snapshot(snapshot(target))
+    index = window.model.index_for(target.identity)
+    labels: list[str] = []
+
+    def capture() -> None:
+        menu = QApplication.activePopupWidget()
+        assert isinstance(menu, QMenu)
+        labels.extend(action.text() for action in menu.actions())
+        menu.close()
+
+    QTimer.singleShot(0, capture)
+    window.context_menu(window.view.visualRect(index).center())
+    assert "Change priority…" not in labels
+    assert "Change CPU affinity…" not in labels
+    assert "Properties" in labels and "End task…" in labels
 
 
 def system_reading(logical: dict[int, float | None] | None = None) -> SystemSample:
