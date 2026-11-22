@@ -47,6 +47,13 @@ def apply_style(app: QApplication) -> None:
         QLabel#performanceValue { color: #f0eaf7; font-size: 15px; font-weight: 600; }
         QLabel#serviceDetailValue { color: #f0eaf7; font-size: 13px; font-weight: 500; }
         QFrame#serviceNotice { background: #2b2131; border: 1px solid #7a4e68; border-radius: 6px; }
+        QFrame#serviceFeedback { background: #262133; border: 1px solid #5c4b75; border-radius: 6px; }
+        QFrame#serviceFeedback[tone="progress"] { background: #292238; border-color: #9b6cc4; }
+        QFrame#serviceFeedback[tone="success"] { background: #1e2d26; border-color: #5ea97b; }
+        QFrame#serviceFeedback[tone="warning"] { background: #2f2622; border-color: #a87f4f; }
+        QFrame#serviceFeedback[tone="error"] { background: #34212a; border-color: #8a5062; }
+        QFrame#serviceRiskBox { background: #35212a; border: 1px solid #965267; border-radius: 6px; }
+        QLabel#serviceRiskTitle { color: #ffc1cd; font-size: 13px; font-weight: 700; }
         QLabel#serviceNoticeText { color: #f6e7f2; font-size: 12px; }
         QScrollArea#serviceDetailsScroll, QWidget#serviceDetailsContent { background: transparent; }
         QSplitter::handle { background: #312a3d; width: 4px; }
@@ -84,6 +91,9 @@ def apply_style(app: QApplication) -> None:
         QPushButton#primary:hover { background: #e1beff; }
         QPushButton#secondary { background: #30243e; color: #eadcff; border-color: #765989; font-weight: 600; }
         QPushButton#secondary:hover { background: #3b2b4b; border-color: #b27bdf; }
+        QPushButton#serviceStart { color: #b8f5cb; border-color: #4f8f69; background: #1f3328; font-weight: 600; }
+        QPushButton#serviceStart:hover { background: #294536; border-color: #8fe7ac; }
+        QPushButton#serviceStart:disabled { color: #8fa397; border-color: #32423a; background: #1e2622; }
         QPushButton#danger { color: #ffc1cd; border-color: #8a5062; background: #38252e; }
         QPushButton#danger:hover { background: #503040; }
         QPushButton#danger:disabled { color: #ad9aa2; border-color: #46343c; background: #251f26; }

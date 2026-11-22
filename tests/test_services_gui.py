@@ -7,9 +7,11 @@ import time
 import pytest
 from PySide6.QtCore import QEventLoop, QObject, QSettings, Qt, QTimer
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QPushButton
+from PySide6.QtWidgets import QApplication, QCheckBox, QDialog, QDialogButtonBox, QLabel, QPushButton
 
+from taskpup import dialogs
 from taskpup.refresh import RefreshController
+from taskpup.service_controls import ServiceAction, ServiceOperationResult, assess_service_risk
 from taskpup.services import ScopeStatus, ServiceIdentity, ServiceRecord, ServicesSnapshot
 from taskpup.settings import Settings
 from taskpup.window import MainWindow
@@ -165,9 +167,13 @@ def test_services_navigation_filtering_selection_details_and_disappearing_servic
     assert page.details.fields["Status"].text() == "Ready."
     assert page.details.rows["Status"].isVisible()
 
-    # Ensure strictly read-only UI: only the Refresh button exists on the Services page.
-    buttons = [btn.text() for btn in page.findChildren(QPushButton)]
-    assert buttons == ["Refresh"]
+    # Verify Phase 3B context-sensitive control buttons for active + static User dbus.service:
+    # Stop & Restart enabled (high-risk user session), Start/Enable/Disable disabled.
+    assert page.start_button.text() == "Start" and not page.start_button.isEnabled()
+    assert page.stop_button.text() == "Stop" and page.stop_button.isEnabled()
+    assert page.restart_button.text() == "Restart" and page.restart_button.isEnabled()
+    assert page.enable_button.text() == "Enable at Startup" and not page.enable_button.isEnabled()
+    assert page.disable_button.text() == "Disable at Startup" and not page.disable_button.isEnabled()
 
     # Search and filter operate purely in memory without triggering new systemd queries.
     calls_before_filter = len(refresh_calls)
@@ -321,3 +327,318 @@ def test_services_worker_emits_failure_without_crashing(qt_app: QApplication) ->
         assert errors == ["unexpected systemd failure"]
     finally:
         controller.stop()
+
+
+def test_service_control_buttons_confirmations_stale_guard_and_feedback(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page = window.services
+    window.navigation.setCurrentIndex(2)
+
+    cups = make_service("cups.service", scope="system", active_state="active", sub_state="running", unit_file_state="enabled")
+    brltty = make_service(
+        "brltty.service", scope="system", loaded=False, load_state=None,
+        active_state=None, sub_state=None, unit_file_state="disabled", main_pid=None,
+    )
+    sys_dbus = make_service("dbus.service", scope="system", active_state="active", sub_state="running", unit_file_state="static")
+    window.apply_services(sample_snapshot(cups, brltty, sys_dbus))
+
+    # No selection -> all 5 buttons disabled.
+    assert all(not button.isEnabled() for button in page.action_buttons.values())
+
+    # Protected system dbus.service -> all 5 buttons disabled with reason tooltips.
+    page.view.setCurrentIndex(page.model.index_for(sys_dbus.identity))
+    assert all(not button.isEnabled() for button in page.action_buttons.values())
+    assert "D-Bus" in page.stop_button.toolTip()
+
+    # Unloaded disabled service -> Start and Enable enabled.
+    page.view.setCurrentIndex(page.model.index_for(brltty.identity))
+    assert page.start_button.isEnabled() and page.enable_button.isEnabled()
+    assert not page.stop_button.isEnabled() and not page.restart_button.isEnabled() and not page.disable_button.isEnabled()
+
+    # User cancelling confirmation emits no action.
+    requested: list[tuple[ServiceIdentity, str, bool]] = []
+    page.action_requested.connect(lambda ident, act, ack: requested.append((ident, act, ack)))
+    monkeypatch.setattr(dialogs, "confirm_service_action", lambda *args: False)
+    page.start_button.click()
+    assert requested == []
+
+    # Confirmed action emits immutable (identity, action, high_risk_acknowledged).
+    monkeypatch.setattr(dialogs, "confirm_service_action", lambda *args: True)
+    page.enable_button.click()
+    assert requested == [(brltty.identity, "enable", False)]
+
+    # While operation is in progress, all action buttons disable and changing selection does NOT redirect or unlock.
+    page.set_operation_started(brltty.identity, "enable")
+    assert page.feedback.isVisible() and "Enabling brltty.service" in page.feedback_label.text()
+    assert page.feedback_dismiss.isHidden()
+    page.view.setCurrentIndex(page.model.index_for(cups.identity))
+    assert page.selected() == cups
+    assert all(not button.isEnabled() for button in page.action_buttons.values())
+
+    # Completing operation shows feedback, re-enables buttons according to current selection.
+    page.apply_operation_result(
+        ServiceOperationResult(brltty.identity, "enable", "succeeded", "Enabled brltty.service at startup (Enabled).")
+    )
+    assert page.feedback.isVisible() and page.feedback_dismiss.isVisible()
+    assert "Enabled brltty.service" in page.feedback_label.text()
+    assert page.stop_button.isEnabled() and page.restart_button.isEnabled() and page.disable_button.isEnabled()
+
+    # Stale selection guard: if service disappears while confirmation dialog is open, do not emit action.
+    requested.clear()
+
+    def disappear_during_confirm(*args) -> bool:
+        window.apply_services(sample_snapshot(brltty, sys_dbus))
+        return True
+
+    monkeypatch.setattr(dialogs, "confirm_service_action", disappear_during_confirm)
+    page.stop_button.click()
+    assert requested == []
+    assert "no longer present" in page.feedback_label.text()
+
+
+def test_high_risk_confirmation_dialog_requires_impact_checkbox(window: MainWindow, monkeypatch: pytest.MonkeyPatch) -> None:
+    dm = make_service("lightdm.service", scope="system", active_state="active", sub_state="running", unit_file_state="indirect")
+    risk = assess_service_risk(dm, "restart")
+    assert risk.level == "high"
+
+    inspected: dict[str, bool] = {}
+
+    def fake_exec(dialog: QDialog) -> int:
+        checkboxes = dialog.findChildren(QCheckBox)
+        assert len(checkboxes) == 1
+        button_box = dialog.findChild(QDialogButtonBox)
+        assert button_box is not None
+        accept = next(btn for btn in button_box.buttons() if button_box.buttonRole(btn) == QDialogButtonBox.ButtonRole.AcceptRole)
+        inspected["initially_disabled"] = not accept.isEnabled()
+        checkboxes[0].setChecked(True)
+        inspected["enabled_after_check"] = accept.isEnabled()
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(QDialog, "exec", fake_exec)
+    assert dialogs.confirm_service_action(window, dm, "restart", risk) is True
+    assert inspected == {"initially_disabled": True, "enabled_after_check": True}
+
+
+def test_service_action_worker_prevents_duplicates_discards_stale_refresh_and_stops_cleanly(
+    qt_app: QApplication,
+) -> None:
+    gui_thread = get_ident()
+    action_started = Event()
+    action_release = Event()
+    stale_refresh_started = Event()
+    stale_refresh_cancelled = Event()
+    refreshes: list[int] = []
+    actions_run: list[tuple[ServiceIdentity, ServiceAction, bool, int]] = []
+    finished: list[tuple[int, ServiceOperationResult]] = []
+    snapshots: list[ServicesSnapshot] = []
+
+    def loader(stop: Event) -> ServicesSnapshot:
+        call = len(refreshes) + 1
+        refreshes.append(call)
+        if call == 1:
+            stale_refresh_started.set()
+            if stop.wait(3.0):
+                stale_refresh_cancelled.set()
+            return sample_snapshot(make_service("stale-before-action.service"))
+        return sample_snapshot(make_service("fresh-after-action.service"))
+
+    def executor(
+        identity: ServiceIdentity,
+        action: ServiceAction,
+        stop: Event,
+        high_risk_acknowledged: bool,
+    ) -> ServiceOperationResult:
+        actions_run.append((identity, action, high_risk_acknowledged, get_ident()))
+        if len(actions_run) == 1:
+            action_started.set()
+            action_release.wait(3.0)
+            return ServiceOperationResult(identity, action, "succeeded", f"Restarted {identity.unit} (Running).")
+        stop.wait(3.0)
+        return ServiceOperationResult(identity, action, "interrupted", "Stopped monitoring; final outcome unknown.")
+
+    parent = QObject()
+    controller = RefreshController(parent, services=loader, service_executor=executor)
+    controller.services_ready.connect(snapshots.append)
+    controller.service_action_finished.connect(lambda res: finished.append((get_ident(), res)))
+    try:
+        # Start a discovery refresh first; starting a service action invalidates that stale pre-action scan.
+        controller.request_services()
+        wait_for(stale_refresh_started.is_set)
+
+        target = ServiceIdentity("system", "cups.service")
+        assert controller.request_service_action(target, "restart", True) is True
+        wait_for(action_started.is_set)
+        wait_for(stale_refresh_cancelled.is_set)
+
+        # Duplicate / concurrent control operation is rejected immediately.
+        assert controller.request_service_action(ServiceIdentity("system", "other.service"), "stop") is False
+
+        action_release.set()
+        wait_for(lambda: len(finished) == 1 and len(snapshots) == 1 and controller.service_action_future is None)
+        assert actions_run[0][:3] == (target, "restart", True)
+        assert actions_run[0][3] != gui_thread
+        assert finished[0][0] == gui_thread
+        assert finished[0][1].outcome == "succeeded"
+        # Stale pre-action snapshot was discarded; only post-action fresh snapshot was delivered.
+        assert [r.unit for r in snapshots[0].services] == ["fresh-after-action.service"]
+
+        # Shutdown cancels an in-flight action cleanly and emits no post-stop signals.
+        assert controller.request_service_action(target, "stop") is True
+        wait_for(lambda: len(actions_run) == 2)
+        future = controller.service_action_future
+        assert future is not None
+        controller.stop()
+        wait_for(future.done)
+        QTest.qWait(45)
+        assert len(finished) == 1
+        assert future.result().outcome == "interrupted"
+    finally:
+        action_release.set()
+        controller.stop()
+
+
+def test_p2_close_behavior_idle_keep_open_exit_anyway_and_completion_during_prompt(
+    qt_app: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def make_window(executor, loader=None) -> MainWindow:
+        settings = Settings(QSettings(str(tmp_path / f"s-{time.monotonic_ns()}.ini"), QSettings.Format.IniFormat))
+        win = MainWindow(settings)
+        win.refresh.interval.stop()
+        win.refresh.performance_interval.stop()
+        win.refresh.service_action_runner = executor
+        if loader is not None:
+            win.refresh.services_loader = loader
+        win.show()
+        return win
+
+    # 1. Closing with NO operation pending closes immediately without any close dialog.
+    prompted: list[tuple[ServiceIdentity, ServiceAction]] = []
+    monkeypatch.setattr(
+        dialogs,
+        "confirm_close_with_pending_service_action",
+        lambda parent, ident, act, **kw: prompted.append((ident, act)) or False,
+    )
+    idle_win = make_window(lambda *a: ServiceOperationResult(a[0], a[1], "succeeded", "ok"))
+    idle_win.close()
+    assert not idle_win.isVisible()
+    assert prompted == []
+
+    # 2. Closing with an operation in progress: Keep TaskPup Open preserves monitoring & prevents duplicate prompts.
+    started = Event()
+    release = Event()
+    finished_results: list[ServiceOperationResult] = []
+    target = ServiceIdentity("system", "cups.service")
+
+    def slow_executor(ident: ServiceIdentity, act: ServiceAction, stop: Event, ack: bool) -> ServiceOperationResult:
+        started.set()
+        if release.wait(3.0):
+            return ServiceOperationResult(ident, act, "succeeded", f"Restarted {ident.unit} (Running).")
+        return ServiceOperationResult(ident, act, "interrupted", "Stopped monitoring; final outcome unknown.")
+
+    keep_win = make_window(slow_executor, loader=lambda _s: sample_snapshot(make_service("cups.service")))
+    keep_win.refresh.service_action_finished.connect(finished_results.append)
+    try:
+        assert keep_win.refresh.request_service_action(target, "restart", False) is True
+        wait_for(started.is_set)
+
+        dialog_text: dict[str, str] = {}
+        duplicate_blocked = False
+
+        def keep_open_exec(dialog: QDialog) -> int:
+            nonlocal duplicate_blocked
+            labels = [lbl.text() for lbl in dialog.findChildren(QLabel)]
+            dialog_text["all"] = "\n".join(labels)
+            button_box = dialog.findChild(QDialogButtonBox)
+            assert button_box is not None
+            texts = [btn.text() for btn in button_box.buttons()]
+            assert "Keep TaskPup Open" in texts and "Exit Anyway" in texts
+            # Attempt a duplicate close while the close dialog is open -> must be ignored without re-entering.
+            keep_win.close()
+            duplicate_blocked = keep_win._close_prompt_open
+            return QDialog.DialogCode.Rejected
+
+        monkeypatch.undo()
+        monkeypatch.setattr(QDialog, "exec", keep_open_exec)
+
+        keep_win.close()
+        assert duplicate_blocked is True
+        assert keep_win.isVisible() and not keep_win.refresh.stop_requested.is_set()
+        assert "cups.service" in dialog_text["all"]
+        assert "System service" in dialog_text["all"]
+        assert "Restart" in dialog_text["all"]
+        assert "unknown" in dialog_text["all"].casefold()
+
+        release.set()
+        wait_for(lambda: len(finished_results) == 1)
+        assert finished_results[0].outcome == "succeeded"
+        assert "Restarted cups.service" in keep_win.services.feedback_label.text()
+    finally:
+        release.set()
+        keep_win.refresh.stop()
+        keep_win.close()
+
+    # 3. Explicitly choosing Exit Anyway exits cleanly, stops worker, and emits NO false success/cancellation.
+    exit_started = Event()
+    exit_stop_seen = Event()
+    exit_finished: list[ServiceOperationResult] = []
+
+    def blocking_executor(ident: ServiceIdentity, act: ServiceAction, stop: Event, ack: bool) -> ServiceOperationResult:
+        exit_started.set()
+        stop.wait(3.0)
+        if stop.is_set():
+            exit_stop_seen.set()
+        return ServiceOperationResult(ident, act, "interrupted", "Stopped monitoring; final outcome unknown.")
+
+    exit_win = make_window(blocking_executor)
+    exit_win.refresh.service_action_finished.connect(exit_finished.append)
+    try:
+        assert exit_win.refresh.request_service_action(ServiceIdentity("user", "pipewire.service"), "stop") is True
+        wait_for(exit_started.is_set)
+        future = exit_win.refresh.service_action_future
+        assert future is not None
+
+        monkeypatch.setattr(QDialog, "exec", lambda _dialog: QDialog.DialogCode.Accepted)
+        exit_win.close()
+        assert not exit_win.isVisible()
+        assert exit_win.refresh.stop_requested.is_set()
+        wait_for(exit_stop_seen.is_set)
+        wait_for(future.done)
+        QTest.qWait(45)
+        assert exit_finished == []
+        assert future.result().outcome == "interrupted"
+    finally:
+        exit_win.refresh.stop()
+        exit_win.close()
+
+    # 4. Operation completing WHILE the real close confirmation dialog is open clears the warning naturally.
+    monkeypatch.undo()
+    comp_started = Event()
+    comp_release = Event()
+    comp_finished: list[ServiceOperationResult] = []
+
+    def completing_executor(ident: ServiceIdentity, act: ServiceAction, stop: Event, ack: bool) -> ServiceOperationResult:
+        comp_started.set()
+        comp_release.wait(3.0)
+        return ServiceOperationResult(ident, act, "succeeded", f"Started {ident.unit} (Running).")
+
+    comp_win = make_window(completing_executor, loader=lambda _s: sample_snapshot(make_service("brltty.service")))
+    comp_win.refresh.service_action_finished.connect(comp_finished.append)
+    try:
+        assert comp_win.refresh.request_service_action(ServiceIdentity("system", "brltty.service"), "start") is True
+        wait_for(comp_started.is_set)
+        # Release the worker 80 ms after the modal close dialog opens so completion happens during the close decision.
+        QTimer.singleShot(80, comp_release.set)
+        comp_win.close()
+        # Dialog auto-dismissed on completion; window remained open showing the real result.
+        assert comp_win.isVisible()
+        assert len(comp_finished) == 1 and comp_finished[0].outcome == "succeeded"
+        assert "Started brltty.service" in comp_win.services.feedback_label.text()
+        assert comp_win.refresh.pending_service_action() is None
+        # Subsequent close succeeds immediately without any pending-operation prompt.
+        comp_win.close()
+        assert not comp_win.isVisible()
+    finally:
+        comp_release.set()
+        comp_win.refresh.stop()
+        comp_win.close()

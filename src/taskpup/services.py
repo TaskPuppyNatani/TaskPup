@@ -36,6 +36,12 @@ SHOW_PROPERTIES = (
     "ActiveEnterTimestamp",
     "StatusText",
     "TriggeredBy",
+    "CanStart",
+    "CanStop",
+    "RefuseManualStart",
+    "RefuseManualStop",
+    "RequiredBy",
+    "PartOf",
 )
 
 SCOPE_LABELS: dict[ServiceScope, str] = {
@@ -155,7 +161,13 @@ class LoadedServiceEntry:
     result: str | None = None
     active_enter_timestamp: str | None = None
     status_text: str | None = None
-    triggered_by: tuple[str, ...] = ()
+    triggered_by: tuple[str, ...] | None = None
+    can_start: bool | None = None
+    can_stop: bool | None = None
+    refuse_manual_start: bool | None = None
+    refuse_manual_stop: bool | None = None
+    required_by: tuple[str, ...] | None = None
+    part_of: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,7 +195,13 @@ class ServiceRecord:
     result: str | None = None
     active_enter_timestamp: str | None = None
     status_text: str | None = None
-    triggered_by: tuple[str, ...] = ()
+    triggered_by: tuple[str, ...] | None = None
+    can_start: bool | None = None
+    can_stop: bool | None = None
+    refuse_manual_start: bool | None = None
+    refuse_manual_stop: bool | None = None
+    required_by: tuple[str, ...] | None = None
+    part_of: tuple[str, ...] | None = None
 
     @property
     def scope(self) -> ServiceScope:
@@ -376,9 +394,15 @@ def _parse_bool(value: str | None) -> bool | None:
     return None
 
 
-def _parse_list(value: str | None) -> tuple[str, ...]:
-    text = _clean_str(value)
-    return tuple(text.split()) if text is not None else ()
+def _parse_list(value: str | None) -> tuple[str, ...] | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    if stripped.casefold() == "n/a":
+        return None
+    if not stripped:
+        return ()
+    return tuple(stripped.split())
 
 
 def parse_list_units_json(text: str) -> list[LoadedServiceEntry]:
@@ -452,6 +476,12 @@ def parse_show_output(text: str) -> list[LoadedServiceEntry]:
                     active_enter_timestamp=_clean_str(block.get("ActiveEnterTimestamp")),
                     status_text=_clean_str(block.get("StatusText")),
                     triggered_by=_parse_list(block.get("TriggeredBy")),
+                    can_start=_parse_bool(block.get("CanStart")),
+                    can_stop=_parse_bool(block.get("CanStop")),
+                    refuse_manual_start=_parse_bool(block.get("RefuseManualStart")),
+                    refuse_manual_stop=_parse_bool(block.get("RefuseManualStop")),
+                    required_by=_parse_list(block.get("RequiredBy")),
+                    part_of=_parse_list(block.get("PartOf")),
                 )
             )
         block.clear()
@@ -546,6 +576,12 @@ def merge_scope_services(
                     active_enter_timestamp=live.active_enter_timestamp,
                     status_text=live.status_text,
                     triggered_by=live.triggered_by,
+                    can_start=live.can_start,
+                    can_stop=live.can_stop,
+                    refuse_manual_start=live.refuse_manual_start,
+                    refuse_manual_stop=live.refuse_manual_stop,
+                    required_by=live.required_by,
+                    part_of=live.part_of,
                 )
             )
         elif installed is not None:
@@ -747,6 +783,12 @@ def _merge_loaded_metadata(
         active_enter_timestamp=detail.active_enter_timestamp,
         status_text=detail.status_text,
         triggered_by=detail.triggered_by,
+        can_start=detail.can_start,
+        can_stop=detail.can_stop,
+        refuse_manual_start=detail.refuse_manual_start,
+        refuse_manual_stop=detail.refuse_manual_stop,
+        required_by=detail.required_by,
+        part_of=detail.part_of,
     )
 
 

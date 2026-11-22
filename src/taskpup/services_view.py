@@ -1,6 +1,7 @@
-"""Read-only Qt table model, filters, and details view for systemd services."""
+"""Qt table model, filters, details, and safe controls for systemd services."""
 
 from collections.abc import Iterable
+from functools import partial
 from html import escape
 from typing import cast
 
@@ -11,8 +12,18 @@ from PySide6.QtWidgets import (
     QPushButton, QScrollArea, QSplitter, QTreeView, QVBoxLayout, QWidget,
 )
 
+from taskpup import dialogs
+from taskpup.service_controls import (
+    ACTION_LABELS,
+    ACTION_PRESENT_PARTICIPLES,
+    SERVICE_ACTIONS,
+    ServiceAction,
+    ServiceOperationResult,
+    assess_service_risk,
+    evaluate_service_actions,
+)
 from taskpup.services import (
-    ScopeFilter, ServiceIdentity, ServiceRecord, ServicesSnapshot, StateFilter, UNAVAILABLE, matches_filters,
+    SCOPE_LABELS, ScopeFilter, ServiceIdentity, ServiceRecord, ServicesSnapshot, StateFilter, UNAVAILABLE, matches_filters,
 )
 
 SERVICE_COLUMNS = ("Service", "Description", "State", "Startup", "Scope")
@@ -49,6 +60,8 @@ DETAIL_FIELDS = (
     "Result",
     "Active since",
     "Triggered by",
+    "Required by",
+    "Manual control",
     "Transient",
     "Status",
 )
@@ -280,10 +293,29 @@ class ServiceDetailsPanel(QFrame):
 
         if record.triggered_by:
             triggered_by = ", ".join(record.triggered_by)
-        elif record.loaded:
+        elif record.triggered_by is not None:
             triggered_by = "None"
         else:
             triggered_by = UNAVAILABLE
+
+        if record.required_by:
+            required_by = ", ".join(record.required_by)
+        elif record.required_by is not None:
+            required_by = "None"
+        else:
+            required_by = UNAVAILABLE
+
+        restrictions: list[str] = []
+        if record.refuse_manual_start is True or record.can_start is False:
+            restrictions.append("manual start restricted")
+        if record.refuse_manual_stop is True or record.can_stop is False:
+            restrictions.append("manual stop restricted")
+        if restrictions:
+            manual_control = "; ".join(restrictions).capitalize()
+        elif record.loaded:
+            manual_control = "Standard"
+        else:
+            manual_control = UNAVAILABLE
 
         if record.transient is True:
             transient_text = "Yes"
@@ -309,6 +341,8 @@ class ServiceDetailsPanel(QFrame):
             "Result": record.result or UNAVAILABLE,
             "Active since": record.active_enter_timestamp or UNAVAILABLE,
             "Triggered by": triggered_by,
+            "Required by": required_by,
+            "Manual control": manual_control,
             "Transient": transient_text,
             "Status": record.status_text or "",
         }
@@ -319,12 +353,14 @@ class ServiceDetailsPanel(QFrame):
 
 class ServicesPage(QWidget):
     refresh_requested = Signal()
+    action_requested = Signal(object, str, bool)
 
     def __init__(self) -> None:
         super().__init__()
         self.snapshot: ServicesSnapshot | None = None
         self.loading = False
         self.initialized = False
+        self.operation_in_progress: tuple[ServiceIdentity, ServiceAction] | None = None
         self.model = ServiceTableModel()
 
         layout = QVBoxLayout(self)
@@ -370,6 +406,56 @@ class ServicesPage(QWidget):
         controls.addWidget(self.scope_filter)
         controls.addWidget(self.refresh_button)
         layout.addLayout(controls)
+
+        actions_row = QHBoxLayout()
+        actions_row.setSpacing(6)
+        self.start_button = QPushButton(ACTION_LABELS["start"])
+        self.start_button.setObjectName("serviceStart")
+        self.start_button.setAccessibleName("Start selected service")
+        self.stop_button = QPushButton(ACTION_LABELS["stop"])
+        self.stop_button.setObjectName("danger")
+        self.stop_button.setAccessibleName("Stop selected service")
+        self.restart_button = QPushButton(ACTION_LABELS["restart"])
+        self.restart_button.setObjectName("secondary")
+        self.restart_button.setAccessibleName("Restart selected service")
+        self.enable_button = QPushButton(ACTION_LABELS["enable"])
+        self.enable_button.setObjectName("secondary")
+        self.enable_button.setAccessibleName("Enable selected service at startup")
+        self.disable_button = QPushButton(ACTION_LABELS["disable"])
+        self.disable_button.setAccessibleName("Disable selected service at startup")
+
+        self.action_buttons: dict[ServiceAction, QPushButton] = {
+            "start": self.start_button,
+            "stop": self.stop_button,
+            "restart": self.restart_button,
+            "enable": self.enable_button,
+            "disable": self.disable_button,
+        }
+        for action in SERVICE_ACTIONS:
+            button = self.action_buttons[action]
+            button.setEnabled(False)
+            button.clicked.connect(partial(self.trigger_action, action))
+            actions_row.addWidget(button)
+        actions_row.addStretch()
+        layout.addLayout(actions_row)
+
+        self.feedback = QFrame()
+        self.feedback.setObjectName("serviceFeedback")
+        self.feedback.setProperty("tone", "progress")
+        feedback_layout = QHBoxLayout(self.feedback)
+        feedback_layout.setContentsMargins(10, 7, 10, 7)
+        feedback_layout.setSpacing(8)
+        self.feedback_label = QLabel()
+        self.feedback_label.setObjectName("serviceNoticeText")
+        self.feedback_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.feedback_label.setWordWrap(True)
+        self.feedback_dismiss = QPushButton("Dismiss")
+        self.feedback_dismiss.setAccessibleName("Dismiss service operation message")
+        self.feedback_dismiss.clicked.connect(self.feedback.hide)
+        feedback_layout.addWidget(self.feedback_label, 1)
+        feedback_layout.addWidget(self.feedback_dismiss, alignment=Qt.AlignmentFlag.AlignVCenter)
+        self.feedback.hide()
+        layout.addWidget(self.feedback)
 
         self.notice = QFrame()
         self.notice.setObjectName("serviceNotice")
@@ -420,6 +506,7 @@ class ServicesPage(QWidget):
         header.sortIndicatorChanged.connect(self.redraw)
         self.view.selectionModel().selectionChanged.connect(self.update_selection)
         self.refresh_button.clicked.connect(self.request_refresh)
+        self.update_action_buttons()
 
     def ensure_loaded(self) -> None:
         if not self.initialized and not self.loading:
@@ -477,6 +564,125 @@ class ServicesPage(QWidget):
 
     def update_selection(self) -> None:
         self.details.show_service(self.selected())
+        self.update_action_buttons()
+
+    def update_action_buttons(self) -> None:
+        if self.operation_in_progress is not None:
+            target_id, target_action = self.operation_in_progress
+            reason = f"Waiting for {ACTION_LABELS[target_action].lower()} on {target_id.unit} to complete."
+            for button in self.action_buttons.values():
+                button.setEnabled(False)
+                button.setToolTip(reason)
+            return
+
+        record = self.selected()
+        if record is None:
+            for button in self.action_buttons.values():
+                button.setEnabled(False)
+                button.setToolTip("Select a service to manage it.")
+            return
+
+        availability = evaluate_service_actions(record)
+        for action, button in self.action_buttons.items():
+            state = availability[action]
+            button.setEnabled(state.allowed)
+            if state.allowed:
+                button.setToolTip(f"{ACTION_LABELS[action]}: {record.unit} ({record.scope_label})")
+            else:
+                button.setToolTip(state.reason or f"{ACTION_LABELS[action]} is unavailable for this service.")
+
+    def _show_feedback(self, tone: str, message: str, *, dismissible: bool) -> None:
+        self.feedback.setProperty("tone", tone)
+        self.feedback.style().unpolish(self.feedback)
+        self.feedback.style().polish(self.feedback)
+        self.feedback_label.setText(message)
+        self.feedback_dismiss.setVisible(dismissible)
+        self.feedback.show()
+
+    def _find_in_snapshot(self, identity: ServiceIdentity) -> ServiceRecord | None:
+        if self.snapshot is None:
+            return None
+        for item in self.snapshot.services:
+            if item.identity == identity:
+                return item
+        return None
+
+    def trigger_action(self, action: ServiceAction) -> None:
+        if self.operation_in_progress is not None:
+            return
+        record = self.selected()
+        if record is None:
+            return
+        availability = evaluate_service_actions(record)[action]
+        if not availability.allowed:
+            self._show_feedback("warning", availability.reason or "Requested action is not available.", dismissible=True)
+            self.update_action_buttons()
+            return
+        risk = assess_service_risk(record, action)
+        if not dialogs.confirm_service_action(self, record, action, risk):
+            return
+        # Guard against concurrent operation start or stale selection change while confirmation was open.
+        if self.operation_in_progress is not None:
+            return
+        current = self._find_in_snapshot(record.identity)
+        if current is None:
+            self._show_feedback(
+                "warning",
+                f"{record.unit} is no longer present in the service inventory. Refresh and try again.",
+                dismissible=True,
+            )
+            self.update_action_buttons()
+            return
+        if not evaluate_service_actions(current)[action].allowed:
+            self._show_feedback(
+                "warning",
+                f"{record.unit} changed state while confirming; review its current state before retrying.",
+                dismissible=True,
+            )
+            self.update_action_buttons()
+            return
+        current_risk = assess_service_risk(current, action)
+        if current_risk.level == "high" and risk.level != "high":
+            self._show_feedback(
+                "warning",
+                f"{record.unit} now requires high-risk confirmation; review its updated state and try again.",
+                dismissible=True,
+            )
+            self.update_action_buttons()
+            return
+        self.action_requested.emit(record.identity, action, risk.level == "high")
+
+    def set_operation_started(self, identity: ServiceIdentity, action: str) -> None:
+        if action not in SERVICE_ACTIONS:
+            return
+        typed_action = cast(ServiceAction, action)
+        self.operation_in_progress = (identity, typed_action)
+        verb = ACTION_PRESENT_PARTICIPLES[typed_action]
+        scope_label = SCOPE_LABELS[identity.scope]
+        auth_hint = " Waiting for systemd / Polkit authorization." if identity.scope == "system" else " Waiting for user systemd manager."
+        self._show_feedback("progress", f"{verb} {identity.unit} ({scope_label})…{auth_hint}", dismissible=False)
+        self.update_action_buttons()
+
+    def apply_operation_result(self, result: ServiceOperationResult) -> None:
+        self.operation_in_progress = None
+        if result.outcome == "cancelled":
+            self.feedback.hide()
+            self.update_action_buttons()
+            return
+        tone_map = {
+            "succeeded": "success",
+            "warning": "warning",
+            "auth_cancelled": "warning",
+            "timed_out": "warning",
+            "interrupted": "warning",
+            "auth_unavailable": "error",
+            "failed": "error",
+        }
+        message = result.summary
+        if result.detail and result.outcome in {"failed", "auth_unavailable", "timed_out"}:
+            message = f"{message}\nDetails: {result.detail}"
+        self._show_feedback(tone_map.get(result.outcome, "error"), message, dismissible=True)
+        self.update_action_buttons()
 
     def redraw(self) -> None:
         view = self.view

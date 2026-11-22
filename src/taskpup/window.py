@@ -20,6 +20,7 @@ from taskpup.platform import logo_path, open_executable_location, start_task
 from taskpup.processes import Identity, ProcessRow, Resources, Snapshot
 from taskpup.refresh import RefreshController
 from taskpup.report_dialog import ReportDialog
+from taskpup.service_controls import ServiceOperationResult
 from taskpup.services import ServicesSnapshot
 from taskpup.services_view import ServicesPage
 from taskpup.settings import Settings
@@ -64,6 +65,7 @@ class MainWindow(QMainWindow):
         self.settings = settings if settings is not None else Settings()
         self.rows: tuple[ProcessRow, ...] = ()
         self.collapsed: set[Identity] = set()
+        self._close_prompt_open = False
         self.model = ProcessModel()
         self.refresh = RefreshController(self)
 
@@ -236,8 +238,11 @@ class MainWindow(QMainWindow):
         self.refresh.performance_failed.connect(self.performance.record_failure)
         self.refresh.services_ready.connect(self.apply_services)
         self.refresh.services_failed.connect(self.services_failed)
+        self.refresh.service_action_started.connect(self.services.set_operation_started)
+        self.refresh.service_action_finished.connect(self.apply_service_operation)
         self.performance.monitoring_changed.connect(self.refresh.set_performance)
         self.services.refresh_requested.connect(self.refresh.request_services)
+        self.services.action_requested.connect(self.refresh.request_service_action)
         self.set_auto(self.auto.isChecked())
         self.statusBar().showMessage("Reading processes…")
         self.redraw()
@@ -277,6 +282,10 @@ class MainWindow(QMainWindow):
 
     def services_failed(self, error: str) -> None:
         self.services.apply_error(error)
+
+    def apply_service_operation(self, result: ServiceOperationResult) -> None:
+        self.services.apply_operation_result(result)
+        self.statusBar().showMessage(result.summary, 6000)
 
     def process_properties_shortcut(self) -> None:
         if self.navigation.currentIndex() == 0:
@@ -506,6 +515,24 @@ class MainWindow(QMainWindow):
             self.do_action(lambda: start_task(command), "Task started")
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        pending = self.refresh.pending_service_action()
+        if pending is not None:
+            if self._close_prompt_open:
+                event.ignore()
+                return
+            self._close_prompt_open = True
+            try:
+                allow_exit = dialogs.confirm_close_with_pending_service_action(
+                    self,
+                    pending[0],
+                    pending[1],
+                    finished_signal=self.refresh.service_action_finished,
+                )
+            finally:
+                self._close_prompt_open = False
+            if not allow_exit:
+                event.ignore()
+                return
         self.refresh.stop()
         self.performance.save()
         self.settings.save(

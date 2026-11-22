@@ -1,8 +1,8 @@
 """Dialogs for inspecting and acting on a selected process."""
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, SignalInstance
 from PySide6.QtWidgets import (
-    QDialog, QDialogButtonBox, QLabel, QListWidget, QListWidgetItem, QMessageBox,
+    QCheckBox, QDialog, QDialogButtonBox, QFrame, QLabel, QListWidget, QListWidgetItem, QMessageBox,
     QPlainTextEdit, QPushButton, QSpinBox, QVBoxLayout, QWidget,
 )
 
@@ -10,6 +10,8 @@ from taskpup.management import TreePlan
 from taskpup.model import memory_text
 from taskpup.platform import online_cpus
 from taskpup.processes import ProcessRow, STATUSES
+from taskpup.service_controls import ACTION_EFFECTS, ACTION_LABELS, RiskAssessment, ServiceAction
+from taskpup.services import SCOPE_LABELS, ServiceIdentity, ServiceRecord
 
 
 def process_label(row: ProcessRow) -> str:
@@ -152,3 +154,139 @@ def show_properties(parent: QWidget, row: ProcessRow) -> None:
     layout.addWidget(buttons)
     dialog.resize(540, 370)
     dialog.exec()
+
+
+def confirm_service_action(
+    parent: QWidget,
+    record: ServiceRecord,
+    action: ServiceAction,
+    risk: RiskAssessment,
+) -> bool:
+    """Ask the user to confirm a systemd service control operation."""
+    action_label = ACTION_LABELS[action]
+    title = f"{action_label} service"
+    dialog = QDialog(parent)
+    dialog.setWindowTitle(title)
+    layout = QVBoxLayout(dialog)
+    layout.setSpacing(10)
+
+    heading = QLabel(f"{action_label}: {record.unit}")
+    heading.setObjectName("resourceName")
+    heading.setTextFormat(Qt.TextFormat.PlainText)
+    heading.setWordWrap(True)
+    layout.addWidget(heading)
+
+    details_lines = [
+        f"Scope: {record.scope_label} service",
+        f"Current state: {record.state_label} · Startup: {record.enablement_label}",
+        ACTION_EFFECTS[action],
+    ]
+    if record.scope == "system":
+        details_lines.append("This System service change may prompt for administrator authorization via Polkit.")
+    summary = QLabel("\n".join(details_lines))
+    summary.setTextFormat(Qt.TextFormat.PlainText)
+    summary.setWordWrap(True)
+    layout.addWidget(summary)
+
+    if risk.notes:
+        note_label = QLabel("\n".join(risk.notes))
+        note_label.setObjectName("performanceMuted")
+        note_label.setTextFormat(Qt.TextFormat.PlainText)
+        note_label.setWordWrap(True)
+        layout.addWidget(note_label)
+
+    ack_checkbox: QCheckBox | None = None
+    if risk.level == "high" and risk.warnings:
+        warning_box = QFrame()
+        warning_box.setObjectName("serviceRiskBox")
+        warning_layout = QVBoxLayout(warning_box)
+        warning_layout.setContentsMargins(10, 8, 10, 8)
+        warning_layout.setSpacing(4)
+        warning_title = QLabel(f"High-risk operation ({risk.category or 'Critical Service'})")
+        warning_title.setObjectName("serviceRiskTitle")
+        warning_title.setTextFormat(Qt.TextFormat.PlainText)
+        warning_title.setWordWrap(True)
+        warning_body = QLabel("\n".join(f"• {warning}" for warning in risk.warnings))
+        warning_body.setObjectName("serviceNoticeText")
+        warning_body.setTextFormat(Qt.TextFormat.PlainText)
+        warning_body.setWordWrap(True)
+        warning_layout.addWidget(warning_title)
+        warning_layout.addWidget(warning_body)
+        layout.addWidget(warning_box)
+
+        ack_checkbox = QCheckBox("I understand the potential impact on this system")
+        layout.addWidget(ack_checkbox)
+
+    disruptive = action in {"stop", "restart", "disable"} or risk.level == "high"
+    accept = add_buttons(dialog, layout, action_label, danger=disruptive)
+    if ack_checkbox is not None:
+        accept.setEnabled(False)
+        ack_checkbox.toggled.connect(accept.setEnabled)
+
+    dialog.setMinimumWidth(440)
+    return dialog.exec() == QDialog.DialogCode.Accepted
+
+
+def confirm_close_with_pending_service_action(
+    parent: QWidget,
+    identity: ServiceIdentity,
+    action: ServiceAction,
+    *,
+    finished_signal: SignalInstance | None = None,
+) -> bool:
+    """Confirm exiting while a systemd service operation is still being monitored."""
+    dialog = QDialog(parent)
+    dialog.setWindowTitle("Service operation in progress")
+    layout = QVBoxLayout(dialog)
+    layout.setSpacing(10)
+
+    action_label = ACTION_LABELS[action]
+    scope_label = SCOPE_LABELS[identity.scope]
+
+    heading = QLabel(f"{action_label} on {identity.unit} is still in progress")
+    heading.setObjectName("resourceName")
+    heading.setTextFormat(Qt.TextFormat.PlainText)
+    heading.setWordWrap(True)
+    layout.addWidget(heading)
+
+    body = QLabel(
+        f"Service: {identity.unit}\n"
+        f"Scope: {scope_label} service\n"
+        f"Requested operation: {action_label}\n\n"
+        "TaskPup is still monitoring this operation. Exiting now stops local monitoring, "
+        "but does not guarantee that the request is cancelled: systemd may continue changing "
+        "the service in the background after TaskPup closes, and the final outcome will be unknown."
+    )
+    body.setTextFormat(Qt.TextFormat.PlainText)
+    body.setWordWrap(True)
+    layout.addWidget(body)
+
+    buttons = QDialogButtonBox()
+    keep_open = buttons.addButton("Keep TaskPup Open", QDialogButtonBox.ButtonRole.RejectRole)
+    exit_anyway = buttons.addButton("Exit Anyway", QDialogButtonBox.ButtonRole.DestructiveRole)
+    exit_anyway.setObjectName("danger")
+    keep_open.setDefault(True)
+    keep_open.setFocus()
+    keep_open.clicked.connect(dialog.reject)
+    exit_anyway.clicked.connect(dialog.accept)
+    layout.addWidget(buttons)
+
+    completed_while_open = False
+
+    def on_finished(_result: object) -> None:
+        nonlocal completed_while_open
+        completed_while_open = True
+        dialog.reject()
+
+    if finished_signal is not None:
+        finished_signal.connect(on_finished)
+    try:
+        dialog.setMinimumWidth(450)
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+    finally:
+        if finished_signal is not None:
+            try:
+                finished_signal.disconnect(on_finished)
+            except RuntimeError:
+                pass
+    return accepted and not completed_while_open

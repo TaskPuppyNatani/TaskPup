@@ -138,6 +138,9 @@ def test_parse_show_output_handles_properties_equals_and_non_services() -> None:
     assert second.main_pid is None
     assert second.unit_file_preset is None
     assert second.active_enter_timestamp is None
+    assert second.triggered_by == ()
+    assert second.required_by is None
+    assert second.part_of is None
 
 
 def test_parse_unit_files_json_filters_services_and_rejects_malformed() -> None:
