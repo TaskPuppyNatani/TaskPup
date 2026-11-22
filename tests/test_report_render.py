@@ -1,4 +1,7 @@
+import copy
+from html.parser import HTMLParser
 import json
+import re
 import stat
 import zipfile
 
@@ -119,9 +122,12 @@ def test_nested_capacity_and_network_bytes_are_readable_but_jsonl_stays_exact() 
     assert "Used Bytes" not in markdown and "Total Bytes" not in markdown
     assert "Bytes Received" not in markdown and "Receive Bytes Per Second" not in markdown
     assert "7.20 GiB" in html and "119.24 GiB" in html
-    assert "Driver Reported VRAM: Used Bytes: 18.72 GiB" in html
-    assert "Bytes Received: 7.20 GiB" in html and "Receive Bytes Per Second: 2.00 KiB/s" in html
-    assert "Packets Received: 1500" in html
+    assert "8.00 GiB" in html
+    assert "VRAM (Driver-Reported)" in html and "18.72 GiB" in html and "24.00 GiB" in html
+    assert "GTT (Driver-Reported)" in html and "1.00 KiB" in html and "2.00 KiB" in html
+    assert "2.00 KiB/s" in html and "1,500" in html
+    assert "Used Bytes" not in html and "Total Bytes" not in html
+    assert "Bytes Received" not in html and "Receive Bytes Per Second" not in html
     assert '"used_bytes": 20100000000' not in markdown + html
     records = [json.loads(line) for line in report_render.render_jsonl(data).splitlines()]
     graphics = next(record["data"] for record in records if record.get("section") == "graphics")
@@ -636,3 +642,883 @@ def test_markdown_escapes_multiline_table_injections_and_preserves_zip_consisten
     assert "⏎" not in standalone_md
     # Code block with backticks uses a longer fence so it cannot break out
     assert "````text" in standalone_md
+
+
+def test_html_dashboard_header_summary_cards_formatting_and_full_data_preservation() -> None:
+    data = rich_diagnostic_snapshot()
+    # Add representative high-precision values and milliwatt idle GPU reading
+    data["sections"]["cpu"]["current_frequency_mhz"] = 5050.211187500001  # type: ignore[index]
+    data["sections"]["cpu"]["temperature_c"] = 39.125  # type: ignore[index]
+    data["sections"]["filesystems"]["mounts"][0]["capacity"]["percent_used"] = 57.971210721172866  # type: ignore[index]
+    data["sections"]["graphics"]["devices"][0]["memory_pools"]["driver_reported_vram"]["used_bytes"] = 1_067_902_238  # type: ignore[index]
+    data["sections"]["graphics"]["devices"][1]["sensors"] = {"GPU temperature": 35.0, "Core clock": 600.0, "Power": 0.005}  # type: ignore[index]
+    data["sections"]["graphics"]["devices"][1]["utilization_percent"] = 0.0  # type: ignore[index]
+    data["sections"]["sensors"]["power_readings"].append({"device": "<hardware-2>", "name": "Power", "value_w": 0.005})  # type: ignore[index]
+    data["sections"]["sensors"]["fan_speeds"].append({"device": "<hardware-2>", "name": "Fan", "value_rpm": 0.0})  # type: ignore[index]
+
+    before = copy.deepcopy(data)
+    html = report_render.render_html(data)
+
+    # Snapshot immutability
+    assert data == before
+
+    # TaskPup header branding, metadata, privacy notice, and no redacted IDs in header
+    header_match = re.search(r"<header\b[^>]*>(.*?)</header>", html, re.DOTALL)
+    assert header_match is not None
+    header_html = header_match.group(1)
+    assert "TaskPup" in header_html
+    assert "System Diagnostic Report" in header_html
+    assert "Hardware &amp; System Diagnostics" in header_html
+    assert "Linux Mint 22.3" in header_html
+    assert "Privacy: Enabled" in header_html
+    assert "TaskPup v0.1.0" in header_html
+    assert "2026-11-21T21:47:25Z" in header_html
+    assert "Automated redaction may not catch every sensitive value" in header_html
+    assert "&lt;host-1&gt;" not in header_html
+    assert "Linux Mint System Profile" not in html
+
+    # All 6 executive summary cards rendered from snapshot
+    summary_match = re.search(r'<section class="exec-grid[^"]*"[^>]*>(.*?)</section>', html, re.DOTALL)
+    assert summary_match is not None
+    summary_html = summary_match.group(1)
+    for title in ("Operating System", "Processor", "System Memory", "Graphics", "Storage", "Network"):
+        assert f'<span class="exec-card-title">{title}</span>' in summary_html
+    assert "AMD Ryzen 7 9800X3D" in summary_html
+    assert "5.05 GHz" in summary_html
+    assert "39.1 °C" in summary_html
+    assert "7.20 GiB RAM" in summary_html
+    assert "1 / 2 Connected" in summary_html
+
+    # Human-readable numeric precision and zero/unavailable/unsupported distinctions
+    assert "58.0%" in html
+    assert "57.971210721172866" not in html
+    assert "5050.211187500001" not in html
+    assert "5.05 GHz" in html
+    assert "600.0 MHz" in html
+    assert "39.1 °C" in html
+    assert "39.125" not in html
+    assert "1,018.43 MiB" in html
+    assert "0.005 W" in html
+    assert "0 RPM" in html
+    assert "1,200 RPM" in html
+    assert "1 Gbps (1,000 Mbps)" in html
+    assert "Not reported" in html  # blank product_version
+    assert "Unsupported" in html  # drive with temperature_supported=False
+
+    # OS firmware + kernel command line preserved inside details
+    assert "Machine &amp; Firmware" in html
+    assert "Kernel Command Line" in html
+    assert "BOOT_IMAGE=/boot/vmlinuz-7.0.0-43-generic root=UUID=&lt;uuid-1&gt; rootflags=subvol=@,compress=zstd ro quiet" in html
+
+    # Desktop displays preserved
+    assert "Connected Displays" in html
+    assert "1920 × 1080" in html and "2560 × 1440" in html and "1.25x" in html
+
+    # CPU capabilities preserved in expandable details
+    assert "Advanced CPU Capabilities &amp; Flags" in html
+    for i in range(12):
+        assert f"flag_{i}" in html
+
+    # Memory bars, cache/buffers, kernel memory, VM config
+    assert "Physical RAM" in html and "Swap Space" in html
+    assert "RAM Load" in html and "Swap Load" in html
+    assert "Cache, Buffers &amp; Kernel Memory" in html
+    assert "Huge Page Size" in html and "2.00 MiB" in html
+    assert "Virtual Memory Configuration" in html and "Swappiness" in html
+
+    # Multi-GPU separated into individual sub-cards with hardware-first headings, VRAM/GTT & caveat
+    assert "<h3>AMD Radeon RX 7900 XTX</h3>" in html
+    assert "<h3>Wani [Radeon R5/R6/R7 Graphics]</h3>" in html
+    assert "VRAM (Driver-Reported)" in html
+    assert "GTT (Driver-Reported)" in html
+    assert "driver-reported; dedicated/shared semantics are not assumed" in html
+    assert "0x1002 / 0x744c" in html
+    assert "Telemetry Capabilities" in html
+    assert "Diagnostic Reference ID" in html and "&lt;hardware-1&gt;" in html
+
+    # Storage separates physical devices & partitions with drive models first and technical refs preserved
+    assert "Physical Storage Devices" in html
+    assert "Partitions" in html
+    assert "Raw block device capacities reflect physical hardware size and differ from mounted filesystem capacities." in html
+    assert "Technical Storage Identifiers" in html
+    assert "&lt;device-1&gt;-partition-2" in html
+
+    # Filesystems: readable volume/mount labels + backing drive + virtual mounts + advanced details + fstab
+    assert "Mounted Storage Volumes" in html
+    assert "ext4 Volume 1" in html
+    assert "System &amp; Virtual Mounts" in html
+    assert "System Mount 1" in html
+    assert "Advanced Mount Details &amp; Options" in html
+    assert "Name: rw" not in html and "Value: remount-ro" not in html
+    assert "rw, relatime" in html
+    assert "rw, errors=remount-ro" in html
+    assert "rw, gid=&lt;user&gt;" in html
+    assert "&lt;mountroot-1&gt;" in html
+    assert "8:3" in html
+    assert "Configured /etc/fstab Entries" in html
+    assert "Technical /etc/fstab Identifiers" in html
+    assert "Non-Entry /etc/fstab Records (Comments &amp; Blank Lines)" in html
+    assert "1, 2" in html  # exact comment line numbers preserved
+    assert "Invalid /etc/fstab Records" in html and "3 fields" in html
+
+    # Network interfaces use hardware-first descriptions + routes + technical refs
+    assert "DNS Resolver" in html and "&lt;ip-32&gt;" in html and "&lt;host-2&gt;" in html
+    assert "Network Interfaces" in html
+    assert "<h3>Ethernet Adapter · r8169</h3>" in html
+    assert "<h3>Loopback Interface 1</h3>" in html
+    assert "Technical Interface Identifiers" in html
+    assert "&lt;interface-1&gt;" in html and "&lt;interface-2&gt;" in html
+    assert "status-up" in html and "status-down" in html
+    assert "Traffic Counters &amp; Rates" in html
+    assert "1.26 GiB" in html and "4.00 KiB/s" in html and "1,211,417" in html and "50,008" in html
+    assert "IPv4 Routes" in html and "IPv6 Routes" in html
+    assert "routes-scroll" in html
+
+    # Sensors grouped cleanly with hardware-first device resolution & technical refs preserved
+    for heading in ("Temperatures", "Drive Temperatures", "Fan Speeds", "Power Readings", "Clock Readings"):
+        assert f"<h3>{heading}</h3>" in html
+    assert "Technical Sensor Device Identifiers" in html
+
+    # Empty errors state
+    assert "Collection Errors" in html and "0 errors" in html
+    assert "No collection errors were reported." in html
+
+
+def test_html_virtual_filesystem_classification_and_large_mount_list() -> None:
+    data = rich_diagnostic_snapshot()
+    mounts: list[dict[str, object]] = [
+        {
+            "device_number": "0:28",
+            "root": "<mountroot-2>",
+            "mountpoint": "<mount-root>",
+            "filesystem_type": "btrfs",
+            "source": "<device-4>-partition-3",
+            "options": [{"name": "rw"}, {"name": "relatime"}],
+            "super_options": [{"name": "rw"}, {"name": "subvol", "value": "/@"}],
+            "capacity": {"total_bytes": 316 * 1024**3, "used_bytes": 183 * 1024**3, "available_bytes": 131 * 1024**3, "percent_used": 57.9},
+        },
+        {
+            "device_number": "259:11",
+            "root": "<mountroot-1>",
+            "mountpoint": "<mount-ntfs>",
+            "filesystem_type": "fuseblk",
+            "source": "<device-2>-partition-1",
+            "options": [{"name": "rw"}],
+            "super_options": [{"name": "rw"}],
+            "capacity": {"total_bytes": 953 * 1024**3, "used_bytes": 820 * 1024**3, "available_bytes": 133 * 1024**3, "percent_used": 86.0},
+        },
+        {
+            "device_number": "0:81",
+            "root": "<mountroot-1>",
+            "mountpoint": "<mount-cifs>",
+            "filesystem_type": "cifs",
+            "source": "<source-1>",
+            "options": [{"name": "rw"}],
+            "super_options": [{"name": "rw"}, {"name": "vers", "value": "3.0"}],
+            "capacity": None,
+            "custom_tag": "smb-share",
+        },
+    ]
+    virtual_types = [
+        "proc", "sysfs", "tmpfs", "cgroup", "cgroup2", "securityfs",
+        "devtmpfs", "devpts", "efivarfs", "bpf", "pstore", "autofs",
+        "debugfs", "tracefs", "fuse.gvfsd-fuse", "fuse.portal", "overlay", "nsfs",
+    ]
+    for idx in range(40):
+        fstype = virtual_types[idx % len(virtual_types)]
+        mounts.append({
+            "device_number": f"0:{100 + idx}",
+            "root": "<mountroot-1>",
+            "mountpoint": f"<mount-virt-{idx}>",
+            "filesystem_type": fstype,
+            "source": fstype,
+            "options": [{"name": "rw"}, {"name": "nosuid"}, {"name": "nodev"}],
+            "super_options": [{"name": "rw"}],
+            "capacity": None,
+        })
+    data["sections"]["filesystems"]["mounts"] = mounts  # type: ignore[index]
+
+    html = report_render.render_html(data)
+
+    # Non-virtual mounts with capacity go into Mounted Storage Volumes (including fuseblk!)
+    vol_section = html.split("Mounted Storage Volumes", 1)[1].split("Additional Storage &amp; Network Mounts", 1)[0]
+    assert "&lt;mount-root&gt;" in vol_section
+    assert "&lt;mount-ntfs&gt;" in vol_section
+    assert "bar-crit" in vol_section  # 86.0% triggers critical bar styling
+    assert "&lt;mount-virt-0&gt;" not in vol_section
+
+    # Non-virtual mount without capacity (cifs) stays separated from virtual mounts
+    extra_section = html.split("Additional Storage &amp; Network Mounts", 1)[1].split("System &amp; Virtual Mounts", 1)[0]
+    assert "&lt;mount-cifs&gt;" in extra_section
+    assert "cifs" in extra_section
+
+    # Large virtual mount list (>6) is collapsed by default inside <details>
+    assert '<details class="details-panel filter-block"><summary><span class="summary-title">System &amp; Virtual Mounts</span><span class="badge mono">40 mounts</span></summary>' in html
+    # Advanced mount details preserve all 43 mounts including extra custom metadata
+    assert '<span class="summary-title">Advanced Mount Details &amp; Options</span><span class="badge mono">43 mounts</span>' in html
+    assert "Custom Tag: smb-share" in html
+    assert "&lt;mount-virt-39&gt;" in html
+
+
+def test_html_missing_data_partial_sections_and_error_visibility() -> None:
+    partial: dict[str, object] = {
+        "schema_version": "1",
+        "timestamp": "2026-11-21T22:00:00Z",
+        "app_version": "0.1.0",
+        "selected_sections": ["memory", "cpu"],
+        "privacy": False,
+        "sections": {
+            "memory": {
+                "ram": None,
+                "swap": {"total_bytes": 0, "available_bytes": 0, "used_bytes": 0, "percent_used": 0.0},
+                "kernel_memory_details": {},
+                "configuration": {},
+            },
+            "cpu": {"available": False},
+        },
+        "errors": [{"section": "cpu", "message": "Collection failed (OSError)."}],
+    }
+    html = report_render.render_html(partial)
+
+    assert "Privacy: Disabled" in html
+    assert "privacy-off" in html
+    # Unselected sections do not fabricate summary cards
+    assert '<span class="exec-card-title">Graphics</span>' not in html
+    assert '<span class="exec-card-title">Storage</span>' not in html
+    assert '<span class="exec-card-title">Network</span>' not in html
+    # Present sections show honest unavailable / unconfigured states
+    assert "RAM not available" in html
+    assert "Not configured" in html
+    assert "0 B" in html
+    assert "CPU information could not be collected." in html
+    # Actual errors are prominently displayed and never hidden behind a success banner
+    assert "card-error" in html
+    assert "1 error" in html
+    assert "Collection failed (OSError)." in html
+    assert "No collection errors were reported." not in html
+
+    # Empty sections map produces a clear fallback card
+    empty_snap = {**partial, "sections": {}, "selected_sections": [], "errors": []}
+    empty_html = report_render.render_html(empty_snap)
+    assert "No diagnostic sections were available." in empty_html
+
+
+def test_html_progress_bar_bounds_and_safe_inline_styles() -> None:
+    data = rich_diagnostic_snapshot()
+    data["sections"]["memory"]["ram"]["percent_used"] = -25.4  # type: ignore[index]
+    data["sections"]["memory"]["swap"]["percent_used"] = 187.6  # type: ignore[index]
+    data["sections"]["graphics"]["devices"][0]["utilization_percent"] = 74.2  # type: ignore[index]
+    data["sections"]["filesystems"]["mounts"][0]["capacity"]["percent_used"] = 999.9  # type: ignore[index]
+
+    html = report_render.render_html(data)
+
+    # All inline style attributes must ONLY be strictly bounded numeric widths (0.0% to 100.0%)
+    styles = re.findall(r'style="([^"]*)"', html)
+    assert styles, "expected bounded progress-bar width styles"
+    for style in styles:
+        match = re.fullmatch(r"width: (\d+(?:\.\d+)?)%;", style)
+        assert match is not None, f"unexpected inline style: {style!r}"
+        width_val = float(match.group(1))
+        assert 0.0 <= width_val <= 100.0
+    assert "width: 0.0%;" in html
+    assert "width: 100.0%;" in html
+    assert "width: 74.2%;" in html
+    assert "bar-warn" in html
+
+
+@pytest.mark.parametrize("huge", [10**400, -(10**400)])
+def test_html_oversized_numeric_values_are_safe(huge: int) -> None:
+    data = rich_diagnostic_snapshot()
+    sections = data["sections"]
+    sections["memory"]["ram"]["percent_used"] = huge  # type: ignore[index]
+    sections["memory"]["swap"]["percent_used"] = huge  # type: ignore[index]
+    gpu = sections["graphics"]["devices"][0]  # type: ignore[index]
+    gpu["utilization_percent"] = huge
+    gpu["memory_pools"]["driver_reported_vram"]["used_bytes"] = huge
+    gpu["memory_pools"]["driver_reported_vram"]["total_bytes"] = huge
+    gpu["sensors"] = {"Power": huge, "Core clock": huge, "Fan": huge}
+    sections["storage"]["devices"][0]["capacity_bytes"] = huge  # type: ignore[index]
+    sections["filesystems"]["mounts"][0]["capacity"]["percent_used"] = huge  # type: ignore[index]
+    sections["cpu"]["temperature_c"] = huge  # type: ignore[index]
+    sections["cpu"]["current_frequency_mhz"] = huge  # type: ignore[index]
+    sections["os"]["uptime_seconds"] = huge  # type: ignore[index]
+    sections["network"]["interfaces"][0]["link_speed_mbps"] = huge  # type: ignore[index]
+    html = report_render.render_html(data)
+    assert "Out of range" in html
+    assert "NaN%" not in html and "Infinity%" not in html
+    for width in re.findall(r'style="width: ([\d.]+)%;"', html):
+        assert 0 <= float(width) <= 100
+    assert "0 RPM" in report_render._html_rpm_plain(0)
+    assert report_render._html_percent_plain(None) == "Not available"
+    assert report_render._html_percent_plain(42.5) == "42.5%"
+
+
+def test_html_gpu_pool_ratio_handles_extreme_finite_values() -> None:
+    data = rich_diagnostic_snapshot()
+    pool = data["sections"]["graphics"]["devices"][0]["memory_pools"]["driver_reported_vram"]  # type: ignore[index]
+    pool["used_bytes"] = 1e100
+    pool["total_bytes"] = 5e-324
+    html = report_render.render_html(data)
+    assert "Infinity%" not in html
+
+
+@pytest.mark.parametrize("huge", [10**400, -(10**400)])
+def test_zip_export_handles_oversized_percent_without_mutating_snapshot(tmp_path, huge: int) -> None:
+    data = rich_diagnostic_snapshot()
+    data["sections"]["memory"]["ram"]["percent_used"] = huge  # type: ignore[index]
+    before = copy.deepcopy(data)
+    markdown = report_render.render_markdown(data)
+    html = report_render.render_html(data)
+    assert "Out of range" in markdown and "Out of range" in html
+    destination = tmp_path / "report.zip"
+    write_report(data, destination, "zip")
+    with zipfile.ZipFile(destination) as archive:
+        assert archive.read("report.md").decode() == markdown
+        assert archive.read("report.html").decode() == html
+        jsonl = archive.read("report.jsonl").decode()
+        assert jsonl == report_render.render_jsonl(data)
+        records = [json.loads(line) for line in jsonl.splitlines()]
+        memory = next(r["data"] for r in records if r.get("section") == "memory")
+        assert memory["ram"]["percent_used"] == huge
+    assert data == before
+    assert report_render._md_percent(42.5) == "42.5%"
+
+
+@pytest.mark.parametrize("formatter", [report_render._md_bytes, report_render._md_rate,
+    report_render._md_percent, report_render._md_temp, report_render._md_freq_mhz,
+    report_render._md_rpm, report_render._md_watts, report_render._md_speed_mbps,
+    report_render._md_uptime])
+def test_markdown_numeric_formatters_handle_unrepresentable_values(formatter) -> None:
+    for value in (10**400, -(10**400), float("inf"), float("nan")):
+        assert formatter(value) == "Out of range"
+
+
+def test_zip_export_handles_extreme_values_across_numeric_sections(tmp_path) -> None:
+    data = rich_diagnostic_snapshot()
+    sections = data["sections"]
+    sections["memory"]["swap"]["total_bytes"] = 10**400  # type: ignore[index]
+    gpu = sections["graphics"]["devices"][0]  # type: ignore[index]
+    gpu["utilization_percent"] = -(10**400)
+    gpu["memory_pools"]["driver_reported_vram"]["used_bytes"] = 10**400
+    sections["storage"]["devices"][0]["capacity_bytes"] = 10**400  # type: ignore[index]
+    sections["filesystems"]["mounts"][0]["capacity"]["percent_used"] = 10**400  # type: ignore[index]
+    destination = tmp_path / "extreme.zip"
+    write_report(data, destination, "zip")
+    with zipfile.ZipFile(destination) as archive:
+        assert b"Out of range" in archive.read("report.md")
+        assert b"Out of range" in archive.read("report.html")
+
+
+def test_html_escapes_hostile_inputs_and_handles_long_identifiers() -> None:
+    xss = '"><script>alert("xss")</script><img src=x onerror=alert(1)><svg onload=bad>'
+    long_id = "dev-" + ("a" * 400) + "-end"
+    data = rich_diagnostic_snapshot()
+    data["timestamp"] = f"2026-11-22T00:00:00Z {xss}"
+    data["app_version"] = f"0.1.0{xss}"
+    data["sections"]["os"]["distribution"] = f"Mint {xss}"  # type: ignore[index]
+    data["sections"]["os"]["hostname"] = xss  # type: ignore[index]
+    data["sections"]["cpu"]["model"] = f"CPU {long_id} {xss}"  # type: ignore[index]
+    data["sections"]["cpu"]["capabilities"] = [xss, long_id]  # type: ignore[index]
+    data["sections"]["filesystems"]["mounts"][0]["mountpoint"] = xss  # type: ignore[index]
+    data["sections"]["filesystems"]["mounts"][0]["options"] = [{"name": xss, "value": xss}]  # type: ignore[index]
+    data["sections"]["network"]["interfaces"][0]["interface"] = long_id  # type: ignore[index]
+    data["errors"] = [{"section": xss, "message": xss}]
+
+    html = report_render.render_html(data)
+
+    # Parse DOM tags/attributes to verify zero injected executable elements or event handlers
+    parsed_tags: list[tuple[str, list[tuple[str, str | None]]]] = []
+
+    class SecurityAuditParser(HTMLParser):
+        def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+            parsed_tags.append((tag.lower(), [(k.lower(), v) for k, v in attrs]))
+
+    SecurityAuditParser().feed(html)
+    script_tags = [tag for tag, _ in parsed_tags if tag == "script"]
+    assert len(script_tags) == 1, "only the static inline script tag may exist"
+    assert not any(tag == "img" for tag, _ in parsed_tags)
+    for tag, attrs in parsed_tags:
+        for attr_name, _ in attrs:
+            assert not attr_name.startswith("on"), f"unexpected inline event handler {attr_name} on <{tag}>"
+
+    # Static script never embeds snapshot values
+    script_match = re.search(r"<script>\n(.*?)</script>", html, re.DOTALL)
+    assert script_match is not None
+    assert "alert(" not in script_match.group(1)
+    assert long_id not in script_match.group(1)
+    # Escaped hostile payload and very long identifier remain present and readable
+    without_static_script = re.sub(r"<script>\n.*?</script>", "", html, count=1, flags=re.DOTALL)
+    assert "&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;" in without_static_script
+    assert long_id in without_static_script
+
+
+def test_html_offline_self_contained_interactivity_responsive_css_and_zip_invariance(tmp_path) -> None:
+    data = rich_diagnostic_snapshot()
+    before = copy.deepcopy(data)
+
+    md_standalone = report_render.render_markdown(data)
+    jsonl_standalone = report_render.render_jsonl(data)
+    html_standalone = report_render.render_html(data)
+
+    html_path = tmp_path / "standalone.html"
+    zip_path = tmp_path / "bundle.zip"
+    write_report(data, html_path, "html")
+    write_report(data, zip_path, "zip")
+
+    assert html_path.read_text(encoding="utf-8") == html_standalone
+    with zipfile.ZipFile(zip_path) as archive:
+        assert archive.read("report.html").decode("utf-8") == html_standalone
+        assert archive.read("report.md").decode("utf-8") == md_standalone
+        assert archive.read("report.jsonl").decode("utf-8") == jsonl_standalone
+
+    # Offline self-contained guarantees
+    assert "http://" not in html_standalone
+    assert "https://" not in html_standalone
+    assert "<link " not in html_standalone
+    assert "<script src=" not in html_standalone
+    assert "@import" not in html_standalone
+
+    # Interactive search, details toggle, print controls, and print stylesheet
+    assert 'id="filterInput"' in html_standalone
+    assert 'id="clearFilterBtn"' in html_standalone
+    assert 'id="filterStatus"' in html_standalone
+    assert 'id="filterEmptyState"' in html_standalone
+    assert 'id="toggleDetailsBtn"' in html_standalone
+    assert 'id="printBtn"' in html_standalone
+    assert "Print / Save as PDF" in html_standalone
+    assert "@media print" in html_standalone
+    assert "beforeprint" in html_standalone and "afterprint" in html_standalone
+    # Print is triggered only via button click listener, never automatically on page load
+    script_body = re.search(r"<script>\n(.*?)</script>", html_standalone, re.DOTALL)
+    assert script_body is not None
+    assert script_body.group(1).count("window.print()") == 1
+
+    # Responsive CSS avoids fixed wide min-width overflow traps and handles narrow viewports
+    assert "minmax(620px" not in html_standalone
+    assert "repeat(2, minmax(0, 1fr))" in html_standalone
+    assert "@media (max-width: 1080px)" in html_standalone
+    assert "@media (max-width: 1020px)" in html_standalone
+    assert "@media (max-width: 640px)" in html_standalone
+    assert "overflow-x: auto" in html_standalone
+    assert "overflow-wrap: anywhere" in html_standalone
+
+    # Snapshot remained untouched across all render formats
+    assert data == before
+
+
+def test_html_hardware_first_labels_disambiguation_fallbacks_and_safe_correlations() -> None:
+    snap: dict[str, object] = {
+        "schema_version": "1",
+        "timestamp": "2026-11-22T12:00:00Z",
+        "app_version": "0.1.0",
+        "selected_sections": ["graphics", "storage", "filesystems", "network", "sensors"],
+        "privacy": True,
+        "sections": {
+            "graphics": {
+                "devices": [
+                    {
+                        "identity": "<hardware-1>",
+                        "model": "Navi 31 [Radeon RX 7900 XT/7900 XTX/7900 GRE/7900M]",
+                        "pci_vendor_id": "0x1002",
+                        "pci_device_id": "0x744c",
+                        "driver": "amdgpu",
+                        "utilization_percent": 10.0,
+                        "memory_pools": {},
+                        "sensors": {},
+                        "telemetry_capabilities": ["utilization"],
+                    },
+                    {
+                        "identity": "<hardware-2>",
+                        "model": "Synthetic Accelerator X",
+                        "pci_vendor_id": "0x10de",
+                        "pci_device_id": "0x1234",
+                        "driver": "nouveau",
+                        "utilization_percent": 0.0,
+                        "memory_pools": {},
+                        "sensors": {},
+                        "telemetry_capabilities": [],
+                    },
+                    {
+                        "identity": "<hardware-3>",
+                        "model": "Synthetic Accelerator X",
+                        "pci_vendor_id": "0x10de",
+                        "pci_device_id": "0x1234",
+                        "driver": "nouveau",
+                        "utilization_percent": None,
+                        "memory_pools": {},
+                        "sensors": {},
+                        "telemetry_capabilities": [],
+                    },
+                    {
+                        "identity": "<hardware-4>",
+                        "model": None,
+                        "pci_vendor_id": None,
+                        "pci_device_id": None,
+                        "driver": None,
+                        "utilization_percent": None,
+                        "memory_pools": {},
+                        "sensors": {},
+                        "telemetry_capabilities": [],
+                    },
+                ],
+            },
+            "storage": {
+                "devices": [
+                    {
+                        "device_path": "<device-1>",
+                        "device_name": "<device-1>",
+                        "model": "Samsung SSD 990 PRO 1TB",
+                        "storage_type": "NVMe SSD",
+                        "capacity_bytes": 1000 * 1024**3,
+                        "temperature_c": 34.0,
+                        "temperature_supported": True,
+                    },
+                    {
+                        "device_path": "<device-2>",
+                        "device_name": "<device-2>",
+                        "model": "Samsung SSD 990 PRO 1TB",
+                        "storage_type": "NVMe SSD",
+                        "capacity_bytes": 1000 * 1024**3,
+                        "temperature_c": 36.0,
+                        "temperature_supported": True,
+                    },
+                    {
+                        "device_path": "<device-3>",
+                        "device_name": "<device-3>",
+                        "model": None,
+                        "storage_type": "SATA SSD",
+                        "capacity_bytes": 500 * 1024**3,
+                        "temperature_c": None,
+                        "temperature_supported": False,
+                    },
+                ],
+                "partitions": [
+                    {"device_path": "<device-1>-partition-1", "parent_device": "<device-1>", "partition_number": 1, "capacity_bytes": 500 * 1024**3},
+                    {"device_path": "<device-2>-partition-1", "parent_device": "<device-2>", "partition_number": 1, "capacity_bytes": 500 * 1024**3},
+                    {"device_path": "<device-9>-partition-1", "parent_device": "<device-9>", "partition_number": 1, "capacity_bytes": 500 * 1024**3},
+                ],
+            },
+            "filesystems": {
+                "mountinfo_available": True,
+                "mounts": [
+                    {
+                        "device_number": "0:28",
+                        "root": "<mountroot-1>",
+                        "mountpoint": "<mount-1>",
+                        "filesystem_type": "btrfs",
+                        "source": "<device-1>-partition-1",
+                        "options": [{"name": "rw"}],
+                        "super_options": [{"name": "rw"}],
+                        "capacity": {"total_bytes": 500 * 1024**3, "used_bytes": 100 * 1024**3, "available_bytes": 400 * 1024**3, "percent_used": 20.0},
+                    },
+                    {
+                        "device_number": "8:1",
+                        "root": "<mountroot-1>",
+                        "mountpoint": "<mount-2>",
+                        "filesystem_type": "ntfs3",
+                        "source": "<device-2>-partition-1",
+                        "options": [{"name": "rw"}],
+                        "super_options": [{"name": "rw"}],
+                        "capacity": {"total_bytes": 500 * 1024**3, "used_bytes": 250 * 1024**3, "available_bytes": 250 * 1024**3, "percent_used": 50.0},
+                    },
+                    {
+                        "device_number": "8:2",
+                        "root": "<mountroot-1>",
+                        "mountpoint": "<mount-3>",
+                        "filesystem_type": "ntfs3",
+                        # Same 500 GiB capacity as <device-3>, but unlinked device ID <device-9> must NOT be guessed!
+                        "source": "<device-9>-partition-1",
+                        "options": [{"name": "rw"}],
+                        "super_options": [{"name": "rw"}],
+                        "capacity": {"total_bytes": 500 * 1024**3, "used_bytes": 50 * 1024**3, "available_bytes": 450 * 1024**3, "percent_used": 10.0},
+                    },
+                    {
+                        "device_number": "0:81",
+                        "root": "<mountroot-1>",
+                        "mountpoint": "<mount-4>",
+                        "filesystem_type": "cifs",
+                        "source": "<source-1>",
+                        "options": [{"name": "rw"}],
+                        "super_options": [{"name": "rw"}],
+                        "capacity": None,
+                    },
+                    {
+                        "device_number": "0:22",
+                        "root": "<mountroot-1>",
+                        "mountpoint": "<mount-5>",
+                        "filesystem_type": "proc",
+                        "source": "proc",
+                        "options": [{"name": "rw"}],
+                        "super_options": [{"name": "rw"}],
+                        "capacity": None,
+                    },
+                ],
+                "fstab": {
+                    "available": True,
+                    "entries": [
+                        {
+                            "line": 1,
+                            "record_type": "entry",
+                            "source": "<uuid-1>",
+                            "mountpoint": "<mount-1>",
+                            "filesystem_type": "btrfs",
+                            "options": [{"name": "defaults"}],
+                            "dump": 0,
+                            "pass": 0,
+                        },
+                    ],
+                },
+            },
+            "network": {
+                "addresses_available": True,
+                "interface_stats_available": True,
+                "counters_available": True,
+                "dns": {"nameservers": ["<ip-9>"], "search_domains": []},
+                "interfaces": [
+                    {
+                        "interface": "<interface-1>",
+                        "type": "Ethernet",
+                        "auxiliary": False,
+                        "connection_state": "Connected",
+                        "driver": "r8169",
+                        "link_speed_mbps": 1000,
+                        "addresses": [{"family": "IPv4", "address": "<ip-1>", "netmask": "<ip-2>", "broadcast": None}],
+                        "counters": None,
+                        "rates": None,
+                    },
+                    {
+                        "interface": "<interface-2>",
+                        "type": "Ethernet",
+                        "auxiliary": False,
+                        "connection_state": "Disconnected",
+                        "driver": "r8169",
+                        "link_speed_mbps": None,
+                        "addresses": [{"family": "MAC", "address": "<mac-1>", "netmask": None, "broadcast": None}],
+                        "counters": None,
+                        "rates": None,
+                    },
+                    {
+                        "interface": "<interface-3>",
+                        "type": "Wi-Fi",
+                        "auxiliary": False,
+                        "connection_state": "Connected",
+                        "driver": "mt7921e",
+                        "link_speed_mbps": None,
+                        "addresses": [],
+                        "counters": None,
+                        "rates": None,
+                    },
+                    {
+                        "interface": "<interface-4>",
+                        "type": "Wi-Fi",
+                        "auxiliary": False,
+                        "connection_state": "Disconnected",
+                        "driver": None,
+                        "link_speed_mbps": None,
+                        "addresses": [],
+                        "counters": None,
+                        "rates": None,
+                    },
+                ],
+                "ipv4_routes": [
+                    {"interface": "<interface-1>", "destination": "<ip-3>", "gateway": "<ip-4>", "netmask": "<ip-2>", "metric": 100},
+                ],
+                "ipv6_routes": [
+                    {"interface": "<interface-3>", "destination": "<ip-5>", "gateway": "<ip-6>", "metric": 256},
+                ],
+            },
+            "sensors": {
+                "temperatures_available": True,
+                "fan_speeds_available": False,
+                "temperatures": [{"device": "<hardware-1>", "name": "GPU temperature", "value_c": 42.0}],
+                "drive_temperatures": [
+                    {"device": "<device-1>", "name": "Drive temperature", "value_c": 34.0},
+                    {"device": "<device-2>", "name": "Drive temperature", "value_c": 36.0},
+                ],
+                "fan_speeds": [],
+                "power_readings": [{"device": "<hardware-2>", "name": "Power", "value_w": 55.0}],
+                "clock_readings": [{"device": "<hardware-4>", "name": "Core clock", "value_mhz": 1200.0}],
+            },
+        },
+        "errors": [],
+    }
+
+    before = copy.deepcopy(snap)
+    md_before = report_render.render_markdown(snap)
+    jsonl_before = report_render.render_jsonl(snap)
+    html = report_render.render_html(snap)
+
+    # Immutability + Markdown/JSONL invariance
+    assert snap == before
+    assert report_render.render_markdown(snap) == md_before
+    assert report_render.render_jsonl(snap) == jsonl_before
+
+    # 1. GPU model preferred over <hardware-1>, exact family preserved (no guessed retail SKU), duplicates numbered, missing fallback
+    assert "<h3>Navi 31 [Radeon RX 7900 XT/7900 XTX/7900 GRE/7900M]</h3>" in html
+    assert "<h3>Synthetic Accelerator X (#1)</h3>" in html
+    assert "<h3>Synthetic Accelerator X (#2)</h3>" in html
+    assert "<h3>Graphics Device 4</h3>" in html
+    gpu_section = html.split("<h2>Graphics Hardware (GPU)</h2>", 1)[1].split("<h2>Storage Hardware</h2>", 1)[0]
+    gpu_headers = re.findall(r"<h3>(.*?)</h3>", gpu_section)
+    assert all("&lt;hardware-" not in heading for heading in gpu_headers)
+
+    # 2 & 3. Drive models preferred over <device-N>, duplicate drives numbered, missing model gets neutral fallback (not guessed)
+    storage_section = html.split("<h2>Storage Hardware</h2>", 1)[1].split("<h2>Filesystems &amp; Mounts</h2>", 1)[0]
+    primary_storage = storage_section.split("Technical Storage Identifiers", 1)[0]
+    assert "Samsung SSD 990 PRO 1TB (#1)" in primary_storage
+    assert "Samsung SSD 990 PRO 1TB (#2)" in primary_storage
+    assert "SATA SSD 1" in primary_storage
+    assert "Unlinked Drive" in primary_storage
+    assert "&lt;device-" not in primary_storage
+    # Technical identifiers still preserved inside collapsible details
+    assert "&lt;device-1&gt;" in storage_section and "&lt;device-2&gt;-partition-1" in storage_section
+
+    # 4. Network interface descriptions use safe type + driver, duplicates disambiguated, routes resolved, IPs/MACs still redacted
+    net_section = html.split("<h2>Network Configuration</h2>", 1)[1].split("<h2>Hardware Sensors</h2>", 1)[0]
+    primary_net = net_section.split("Technical Interface Identifiers", 1)[0]
+    assert "<h3>Ethernet Adapter 1 · r8169</h3>" in primary_net
+    assert "<h3>Ethernet Adapter 2 · r8169</h3>" in primary_net
+    assert "<h3>Wi-Fi Adapter · mt7921e</h3>" in primary_net
+    assert "<h3>Wi-Fi Adapter 1</h3>" in primary_net
+    assert "&lt;interface-" not in primary_net
+    assert "&lt;ip-1&gt;" in primary_net and "&lt;mac-1&gt;" in primary_net
+    assert "&lt;interface-1&gt;" in net_section and "&lt;interface-3&gt;" in net_section
+
+    # 5 & 7. Filesystem readable headings + unambiguous backing drive linkage + NO guessed association for <device-9>
+    fs_section = html.split("<h2>Filesystems &amp; Mounts</h2>", 1)[1].split("<h2>Network Configuration</h2>", 1)[0]
+    vol_table = fs_section.split("Mounted Storage Volumes", 1)[1].split("Additional Storage &amp; Network Mounts", 1)[0]
+    assert "Btrfs Volume 1" in vol_table
+    assert "NTFS Volume 1" in vol_table
+    assert "NTFS Volume 2" in vol_table
+    assert "Samsung SSD 990 PRO 1TB (#1)" in vol_table
+    assert "Samsung SSD 990 PRO 1TB (#2)" in vol_table
+    # Unlinked <device-9>-partition-1 (same 500 GiB as SATA SSD 1) must NOT be guessed as SATA SSD 1!
+    ntfs2_row = vol_table.split("NTFS Volume 2", 1)[1].split("</tr>", 1)[0]
+    assert "SATA SSD 1" not in ntfs2_row
+    assert "Storage Device" in ntfs2_row and "Partition 1" in ntfs2_row
+    assert "&lt;mount-" not in vol_table and "&lt;device-" not in vol_table
+    assert "Network Share 1" in fs_section and "Redacted network share" in fs_section
+    assert "System Mount 1" in fs_section
+    # Advanced Mount Details & fstab Technical References preserve redacted correlation IDs
+    assert "Mount ID: <span class=\"mono-span\">&lt;mount-1&gt;</span>" in fs_section
+    assert "&lt;source-1&gt;" in fs_section and "&lt;uuid-1&gt;" in fs_section
+
+    # Sensors resolve hardware-first labels consistently across GPUs and drives
+    sensors_section = html.split("<h2>Hardware Sensors</h2>", 1)[1].split("<h2>Collection Errors</h2>", 1)[0]
+    primary_sensors = sensors_section.split("Technical Sensor Device Identifiers", 1)[0]
+    assert "Navi 31 [Radeon RX 7900 XT/7900 XTX/7900 GRE/7900M]" in primary_sensors
+    assert "Synthetic Accelerator X (#1)" in primary_sensors
+    assert "Graphics Device 4" in primary_sensors
+    assert "Samsung SSD 990 PRO 1TB (#1)" in primary_sensors
+    assert "Samsung SSD 990 PRO 1TB (#2)" in primary_sensors
+    assert "&lt;hardware-" not in primary_sensors and "&lt;device-" not in primary_sensors
+    assert "&lt;hardware-1&gt;" in sensors_section and "&lt;device-1&gt;" in sensors_section
+
+
+def test_html_unredacted_names_permitted_when_privacy_disabled_and_hostile_models_escaped() -> None:
+    hostile_gpu = '"><script>alert("gpu")</script>'
+    hostile_drive = '<img src=x onerror=alert("drive")> SSD'
+    hostile_driver = '<svg onload=bad>drv'
+    snap: dict[str, object] = {
+        "schema_version": "1",
+        "timestamp": "2026-11-22T12:05:00Z",
+        "app_version": "0.1.0",
+        "selected_sections": ["graphics", "storage", "filesystems", "network"],
+        "privacy": False,
+        "sections": {
+            "graphics": {
+                "devices": [
+                    {
+                        "identity": "0000:03:00.0",
+                        "model": hostile_gpu,
+                        "pci_vendor_id": "0x1002",
+                        "pci_device_id": "0x744c",
+                        "driver": hostile_driver,
+                        "utilization_percent": 5.0,
+                        "memory_pools": {},
+                        "sensors": {},
+                        "telemetry_capabilities": [],
+                    },
+                ],
+            },
+            "storage": {
+                "devices": [
+                    {
+                        "device_path": "/dev/nvme0n1",
+                        "device_name": "nvme0n1",
+                        "model": hostile_drive,
+                        "storage_type": "NVMe SSD",
+                        "capacity_bytes": 512 * 1024**3,
+                        "temperature_c": 35.0,
+                        "temperature_supported": True,
+                    },
+                ],
+                "partitions": [
+                    {"device_path": "/dev/nvme0n1p1", "parent_device": "nvme0n1", "partition_number": 1, "capacity_bytes": 512 * 1024**3},
+                ],
+            },
+            "filesystems": {
+                "mountinfo_available": True,
+                "mounts": [
+                    {
+                        "device_number": "259:1",
+                        "root": "/",
+                        "mountpoint": "/data",
+                        "filesystem_type": "ext4",
+                        "source": "/dev/nvme0n1p1",
+                        "options": [{"name": "rw"}],
+                        "super_options": [{"name": "rw"}],
+                        "capacity": {"total_bytes": 512 * 1024**3, "used_bytes": 128 * 1024**3, "available_bytes": 384 * 1024**3, "percent_used": 25.0},
+                    },
+                ],
+                "fstab": {"available": False, "entries": []},
+            },
+            "network": {
+                "addresses_available": True,
+                "interface_stats_available": True,
+                "counters_available": True,
+                "dns": None,
+                "interfaces": [
+                    {
+                        "interface": "enp14s0",
+                        "type": "Ethernet",
+                        "auxiliary": False,
+                        "connection_state": "Connected",
+                        "driver": hostile_driver,
+                        "link_speed_mbps": 1000,
+                        "addresses": [],
+                        "counters": None,
+                        "rates": None,
+                    },
+                ],
+                "ipv4_routes": [{"interface": "enp14s0", "destination": "0.0.0.0", "gateway": "192.0.2.1", "netmask": "0.0.0.0", "metric": 100}],
+                "ipv6_routes": [],
+            },
+        },
+        "errors": [],
+    }
+
+    html = report_render.render_html(snap)
+
+    # Permitted unredacted identifiers stay visible when privacy is disabled
+    assert "0000:03:00.0" in html
+    assert "/dev/nvme0n1" in html and "/dev/nvme0n1p1" in html
+    assert "/data" in html
+    assert "enp14s0" in html
+
+    # Hostile model/driver strings are safely escaped with zero injected executable markup
+    tags: list[tuple[str, list[tuple[str, str | None]]]] = []
+
+    class AuditParser(HTMLParser):
+        def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+            tags.append((tag.lower(), [(k.lower(), v) for k, v in attrs]))
+
+    AuditParser().feed(html)
+    assert sum(1 for tag, _ in tags if tag == "script") == 1
+    assert not any(tag == "img" for tag, _ in tags)
+    for tag, attrs in tags:
+        for attr_name, _ in attrs:
+            assert not attr_name.startswith("on"), f"unexpected handler {attr_name} on <{tag}>"
+    assert "&lt;script&gt;alert(&quot;gpu&quot;)&lt;/script&gt;" in html
+    assert "&lt;img src=x onerror=alert(&quot;drive&quot;)&gt; SSD" in html
+    assert "&lt;svg onload=bad&gt;drv" in html
