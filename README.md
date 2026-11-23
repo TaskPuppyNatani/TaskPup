@@ -69,3 +69,5 @@ TaskPup refuses to run as root and uses the desktop user's permissions. Process 
 ## Branding
 
 The logo above is the official [TaskPuppy Kreations artwork](assets/TaskPuppyLogo.png). AppImage and launcher packaging use a separate [launcher icon](assets/branding/appimage-icon.png); the original in-app logo remains unchanged.
+
+[![AppImage Downloads](https://img.shields.io/github/downloads/TaskPuppyNatani/TaskPup/v0.1.0/TaskPup-x86_64.AppImage?label=AppImage%20Downloads&color=7bd94c)](https://github.com/TaskPuppyNatani/TaskPup/releases/tag/v0.1.0)
