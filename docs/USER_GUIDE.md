@@ -1,0 +1,73 @@
+# TaskPup User Guide
+
+This guide contains the usage details and technical notes previously kept in the project README. TaskPup is a native Linux process manager built with Python, Qt 6, and psutil.
+
+## Project development and verification history
+
+Phase 1 covers process discovery, inspection, and management with live system summaries, targeting LMDE 7 with Cinnamon on X11. Phase 2 adds the CPU, memory, swap, GPU, storage, and network performance dashboard. Phase 2A was verified on desktop and laptop hardware. Phase 2B GPU telemetry was checked on the laptop Radeon R5; user-confirmed acceptance covered the desktop RX 7900 XTX and Granite Ridge integrated Radeon. Phase 2C storage, filesystem, and network pages were directly checked and accepted on an LMDE 7 Cinnamon/X11 desktop. These results describe the listed environments and hardware; they do not establish universal driver or filesystem support.
+
+## Install and run
+
+Use Python 3.11 or newer and run these commands from the project directory as your regular desktop user:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -e .
+.venv/bin/taskpup
+```
+
+If Python cannot create a virtual environment on LMDE, install the distribution's `python3-venv` package. Qt's X11 backend also needs the distribution's XCB libraries, including `libxcb-cursor0`.
+
+## Processes
+
+- Click column headers to sort. Use **Columns** to choose which columns to show. **Tree view** groups visible descendants beneath their parents.
+- Search by name, PID, user, or command. **My processes** shows processes owned by your user. Auto-refresh runs every 1.5 seconds. Press **F5** to sample immediately or **Ctrl+F** to focus search.
+- Right-click a process for properties, clipboard actions, its executable directory, and signals. **End task** sends SIGTERM. **Force kill** sends SIGKILL. Tree actions show the exact PIDs to be signaled, with children handled first.
+- **Run new task** (**Ctrl+N**) starts an executable with arguments from your home directory. Quote paths or arguments containing spaces. Pipes, redirects, and expansions are passed as literal arguments.
+- The summary shows system CPU, RAM, swap, and the total number of processes visible to TaskPup in its latest valid system-wide snapshot. Search and ownership filters only affect the table. Per-process CPU is measured in units of one logical CPU, so a multithreaded process can exceed 100%.
+
+## Process safety and limitations
+
+TaskPup uses the desktop user's permissions and refuses to start as root. Process priority and CPU-affinity changes are disabled for process-identity safety. Monitoring and supported pidfd-based signaling remain available. Read-only affinity queries use numeric IDs and can race process exit and reuse.
+
+Signals use Linux pidfds and require a kernel with `pidfd_open` support (Linux 5.3 or newer). PID 1, kernel threads, and TaskPup itself are protected. Before signaling, TaskPup checks the PID and start time against the sample. Linux reports start times in clock ticks, so reuse within one tick can evade that comparison. Once opened, a pidfd stays bound to the same process.
+
+Tree previews use a sequential scan of the Linux process table. TaskPup rechecks parent identities before previewing descendants and sends signals only to the listed targets.
+
+## Performance dashboard
+
+- Open **Performance** and select **CPU**, **Memory**, **Swap**, a detected GPU, a storage device, or a network interface. **Per logical CPU** switches between the aggregate CPU chart and one chart per logical CPU. Scroll the sidebar to reach additional resources.
+- Choose a history window of 30 seconds, 60 seconds, 5 minutes, or 15 minutes, and a sampling interval of 1, 2, or 5 seconds. Defaults are 60 seconds and 1 second. Hover over a chart for historical readings.
+- **Pause** holds performance history. Process-table auto-refresh and manual refresh have independent controls. Process and thread totals on the CPU page reflect the latest process scan.
+- RAM used is total physical memory minus available memory. Cache and buffer figures are informational and can overlap those totals. Swap activity rates use Linux counter deltas over the measured sample interval.
+- CPU temperature, frequency, and topology depend on reliable system data. Unsupported readings and the first sample of a delta-based metric appear as unavailable. Systems without configured swap show zero capacity and no utilization percentage.
+- GPUs are discovered through Linux DRM. AMD `amdgpu` sysfs and hwmon provide utilization, driver memory pools, and available labeled sensors; capabilities vary by hardware and driver. Adaptive statistics and graphs show supported telemetry while keeping supported fields in place through temporary read failures. Laptop testing verified the integrated Wani Radeon R5/R6/R7. User testing confirmed the RX 7900 XTX and Granite Ridge integrated Radeon are detected independently and expose their available telemetry, including 24 GiB GPU memory on the dedicated card. These are hardware-specific results, not universal GPU compatibility. Other drivers, including legacy `radeon`, are identified but detailed telemetry is not currently supported. Device names depend on the local PCI ID database. Discovery occurs when monitoring first starts; restart TaskPup to discover newly attached GPUs.
+- The GPU memory graph shows the driver's reported VRAM pool, which can be reserved system memory on integrated graphics and is not necessarily physically dedicated memory. GTT is shown separately as a driver allocation and limit; the limit is not system RAM consumption. These figures are not added together. AMD power readings may include CPU power on APUs. Unavailable or inaccessible metrics appear as unavailable.
+- History is kept in memory and bounded to 15 minutes. Dashboard preferences are restored when TaskPup reopens.
+
+### Storage and network
+
+- **Storage** shows per-device read and write rates from Linux `/proc/diskstats` and identifies devices through sysfs. The sidebar lists whole drives and relevant mounted logical devices. Partition space appears in **Mounted filesystems**, and unused pseudo-devices are omitted. Device active time is the share of the sampling interval spent handling I/O. Capacity and device-scoped hwmon temperature depend on information exposed by the device and driver; SMART telemetry is not collected.
+- **Mounted filesystems** shows local filesystem capacity from Linux mount information and filesystem statistics. Related mounts use a representative mount point when their filesystem identity can be established. Filesystem usage is separate from block-device counters, including for Btrfs, partitions, and logical volumes. Remote and pseudo filesystems are omitted.
+- **Network** shows receive and transmit rates from Linux per-interface counters, with interface type and link state from Linux metadata and psutil. Local link speed, when exposed, describes the interface and is not its current throughput. **Show loopback and virtual** reveals auxiliary interfaces hidden by default. Each interface has its own readings. Traffic may be visible on both a bridge or virtual interface and an underlying link, so per-interface readings should not be summed as an aggregate.
+- Throughput uses binary byte-per-second units. Rates resume after a new baseline is available, and a temporarily unavailable counter appears as unavailable. Telemetry uses read-only Linux interfaces and reflects devices visible to the running user.
+
+## systemd services
+
+TaskPup discovers system and user systemd services. Service-control actions use the desktop user's permissions and the system's existing Polkit authorization. Actions are guarded and may be refused when systemd cannot provide enough information to evaluate their safety.
+
+## Export a system report
+
+Choose **Export System Report…**, select diagnostic sections and output format, then choose a destination. Collection and export run in the background. Privacy-Protected Diagnostics is the default. Full Diagnostics includes more identifiers and requires confirmation. Always review a report before sharing: automated redaction cannot guarantee removal of every sensitive value. Passwords, tokens, private keys, and credential-file contents are not intentionally collected.
+
+Markdown, formatted JSON, JSON Lines, and standalone HTML use the same collected snapshot. **All formats** saves a ZIP with one file of each type. JSON contains the schema-versioned snapshot with metadata, selected sections, section data, and errors. JSON Lines schema version 1 remains unchanged: one JSON object per line with `schema_version`, `record_type`, `section`, `timestamp`, and `data`; records describe metadata, selected sections, and collection errors. Missing values are represented as null where applicable. Availability depends on the Linux interfaces and permissions of the desktop user.
+
+## Tested environments
+
+Development phases verified different features on Linux Mint Debian Edition 7 (LMDE 7) with Cinnamon/X11, including desktop and laptop hardware. Storage, filesystem, and network pages were directly checked on an LMDE 7 Cinnamon/X11 desktop. AppImage menu integration, shepherd icon visibility, and launching were user-validated on LMDE 7 Cinnamon/X11 and Linux Mint 22.3 XFCE/X11. GPU acceptance includes an integrated Wani Radeon R5/R6/R7, an RX 7900 XTX, and a Granite Ridge integrated Radeon. These checks describe tested systems only and do not promise support for all distributions, desktop environments, drivers, or hardware. Wayland has not been verified.
+
+## AppImage menu integration
+
+The AppImage offers an explicit **Add to Application Menu** action. It creates user-local launcher files after confirmation and refuses existing TaskPup launchers or destination files. If installation fails partway, it leaves created files in place and reports their paths for careful manual recovery. The AppImage can be moved only if the old launcher is removed and added again. See the [AppImage packaging guide](../packaging/appimage/README.md) for build and provenance details.
+
+The terminal launcher was the original verified startup path. User testing has since validated AppImage menu launching on the two X11 environments listed above. Other desktop environments and Wayland remain unverified.

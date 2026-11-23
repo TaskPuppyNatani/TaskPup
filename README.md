@@ -1,12 +1,41 @@
-# TaskPup
+<p align="center">
+  <img src="assets/TaskPuppyLogo.png" alt="TaskPup mascot, the TaskPuppy Kreations logo" width="190">
+</p>
 
-TaskPup is a native Linux process manager built with Python, Qt 6, and psutil. Phase 1 targets Linux Mint Debian Edition 7 with Cinnamon on X11.
+<h1 align="center">TaskPup</h1>
 
-Phase 1 covers process discovery, inspection, and management with live system summaries. Phase 2 adds a Performance dashboard for CPU, memory, swap, GPU, storage, and network monitoring. Phase 2A was verified on desktop and laptop hardware. Phase 2B GPU telemetry was checked on the laptop Radeon R5, with user-confirmed acceptance for the desktop RX 7900 XTX and Granite Ridge integrated Radeon. Phase 2C storage, filesystem, and network pages were directly checked on an LMDE 7 Cinnamon/X11 desktop and accepted by the user. These checks cover the listed environments and hardware; they do not establish universal driver or filesystem support.
+<p align="center"><strong>A clear view of your Linux system, with the tools to act.</strong></p>
 
-## Install and run
+<p align="center">
+  <img alt="Linux" src="https://img.shields.io/badge/platform-Linux-7a35c9?style=flat-square">
+  <img alt="Python 3.11 and newer" src="https://img.shields.io/badge/Python-3.11%2B-7bd94c?style=flat-square&logo=python&logoColor=111111">
+  <img alt="Qt 6" src="https://img.shields.io/badge/Qt-6-8b52dd?style=flat-square&logo=qt&logoColor=white">
+  <img alt="AppImage packaging is experimental" src="https://img.shields.io/badge/AppImage-packaging%20experimental-7bd94c?style=flat-square">
+</p>
 
-Use Python 3.11 or newer and run these commands from the project directory as your regular desktop user.
+TaskPup is a native desktop task manager for Linux. Inspect and control processes, watch system performance, manage systemd services, and export system diagnostics from one Qt application.
+
+<p align="center">
+  <img src="docs/images/taskpup-performance.webp" alt="TaskPup Performance dashboard with CPU history and sidebar summaries for CPU, memory, swap, two GPUs, and storage" width="100%">
+</p>
+
+<p align="center"><em>TaskPup's Performance dashboard on LMDE 7 Cinnamon/X11. CPU, memory, and GPU readings shown are host-system measurements, not TaskPup's own resource use.</em></p>
+
+## What you can do
+
+- **Find and manage processes.** Search, sort, inspect process details, view parent and child relationships, and send signals with identity-safety checks.
+- **Monitor system performance.** Follow CPU, memory, swap, storage, and network activity over time.
+- **Inspect GPUs.** View available AMD GPU telemetry through Linux DRM, `amdgpu` sysfs, and hwmon. Readings vary by device and driver.
+- **Manage systemd services.** Inspect system and user units; service actions follow the desktop user's authorization and system Polkit rules.
+- **Export diagnostics.** Save HTML, Markdown, JSON, JSONL, or ZIP reports. Privacy-Protected Diagnostics is the default; Full Diagnostics asks for confirmation.
+
+See the [user guide](docs/USER_GUIDE.md) for controls, metric definitions, hardware caveats, and report details.
+
+## Install
+
+### From source
+
+Requires Python 3.11 or newer. Run as your regular desktop user:
 
 ```bash
 python3 -m venv .venv
@@ -14,54 +43,29 @@ python3 -m venv .venv
 .venv/bin/taskpup
 ```
 
-If Python cannot create a virtual environment on LMDE, install the distribution's `python3-venv` package. Qt's X11 backend also needs the distribution's XCB libraries, including `libxcb-cursor0`.
+On LMDE, install the distribution's `python3-venv` package if virtual-environment creation is unavailable. Qt's X11 backend also requires XCB libraries, including `libxcb-cursor0`.
 
-## Use the process manager
+### AppImage
 
-- Click column headers to sort. Use **Columns** to choose which columns to show. **Tree view** groups visible descendants beneath their parents.
-- Search by name, PID, user, or command. **My processes** shows processes owned by your user. Auto-refresh runs every 1.5 seconds. Press **F5** to sample immediately or **Ctrl+F** to focus search.
-- Right-click a process for properties, clipboard actions, its executable directory, and signals. **End task** sends SIGTERM. **Force kill** sends SIGKILL. The tree actions show the exact PIDs that will be signaled, with children handled first.
-- **Run new task** (**Ctrl+N**) starts an executable with arguments from your home directory. Quote paths or arguments that contain spaces. Pipes, redirects, and expansions are passed as literal arguments.
-- The summary shows system CPU, RAM, swap, and the total number of processes visible to TaskPup in its latest valid system-wide snapshot. Search and ownership filters only affect the table. Per-process CPU shows usage in units of one logical CPU. A multithreaded process can exceed 100%.
+AppImage packaging is available for evaluation, but **no official AppImage release has been published yet**. Do not download AppImages from unofficial locations. Build and provenance details are in the [AppImage packaging guide](packaging/appimage/README.md).
 
-TaskPup uses the desktop user's permissions and refuses to start as root. Signals use Linux pidfds and require a kernel with `pidfd_open` support (Linux 5.3 or newer). PID 1, kernel threads, and TaskPup itself are protected. Before signaling, TaskPup checks the PID and start time against the sample. Linux reports start times in clock ticks, so reuse within a single tick can evade that comparison. Once opened, the pidfd stays bound to the same process.
+## Tested environments
 
-Tree previews are built from a sequential scan of the Linux process table. TaskPup rechecks parent identities before previewing their descendants and sends signals only to the listed targets.
+TaskPup has been tested on **LMDE 7 with Cinnamon/X11** and **Linux Mint 22.3 with XFCE/X11**. AppImage menu integration, icon display, and launching were user-validated on those desktop setups. These results do not establish compatibility with every Linux distribution, driver, or desktop environment. Wayland has not been verified.
 
-Priority and CPU-affinity changes are unavailable in this release to avoid a process-identity race when Linux reuses a PID. Monitoring and supported pidfd-based signaling remain available. Read-only affinity queries use numeric IDs and can race process exit and reuse.
+Detailed hardware and platform notes are in the [user guide](docs/USER_GUIDE.md).
 
-The terminal launcher is the verified startup path on Cinnamon/X11. TaskPup supplies its desktop ID to Qt when a matching `taskpup.desktop` is installed. Live registration through an installed desktop entry is unverified.
+## Safety and limitations
 
-## Monitor performance
+TaskPup refuses to run as root and uses the desktop user's permissions. Process priority and CPU-affinity changes are disabled for process-identity safety. Process signaling uses Linux pidfds where available; TaskPup protects PID 1, kernel threads, and itself. See [process safety and metric caveats](docs/USER_GUIDE.md#process-safety-and-limitations).
 
-- Open **Performance** and select **CPU**, **Memory**, **Swap**, a detected GPU, a storage device, or a network interface. **Per logical CPU** switches between the aggregate CPU chart and a chart for each logical CPU. Scroll the sidebar to reach additional resources.
-- Choose a history window of 30 seconds, 60 seconds, 5 minutes, or 15 minutes, and a sampling interval of 1, 2, or 5 seconds. The defaults are 60 seconds and 1 second. Hover over a chart for historical readings.
-- **Pause** holds the performance history. Process-table auto-refresh and manual refresh have independent controls. Process and thread totals on the CPU page reflect the most recent process scan.
-- RAM used is total physical memory minus available memory. The cache and buffer figures are informational and can overlap those totals. Swap activity rates use Linux counter deltas over the measured sample interval.
-- CPU temperature, frequency, and topology depend on the system exposing reliable data. Unsupported readings and the first sample of a delta-based metric are shown as unavailable. Systems without configured swap have a capacity of zero and no utilization percentage.
-- GPUs are discovered through Linux DRM. AMD `amdgpu` sysfs and hwmon provide utilization, driver memory pools, and available labeled sensors; capabilities vary by hardware and driver. Adaptive statistics and graphs show supported telemetry while keeping supported fields in place through temporary read failures. Laptop testing verified the integrated Wani Radeon R5/R6/R7. User testing confirmed the RX 7900 XTX and Granite Ridge integrated Radeon are detected independently and expose their available telemetry, including 24 GiB GPU memory on the dedicated card. This is hardware-specific acceptance, not universal GPU compatibility. Other drivers, including legacy `radeon`, are identified but detailed telemetry is not currently supported. Device names depend on the local PCI ID database. Discovery occurs when monitoring first starts; restart TaskPup to discover newly attached GPUs.
-- The GPU memory graph shows the driver's reported VRAM pool, which can be reserved system memory on integrated graphics and is not necessarily physically dedicated memory. GTT is shown separately as a driver allocation and limit; the limit is not system RAM consumption. These figures are not added together. AMD power readings may include CPU power on APUs. Unavailable or inaccessible metrics are shown as unavailable.
-- History is kept in memory and bounded to 15 minutes. Dashboard preferences are restored when TaskPup reopens.
+## Contributing and technical documentation
 
-### Storage and network
+- [Development setup and checks](CONTRIBUTING.md)
+- [User guide and technical notes](docs/USER_GUIDE.md)
+- [AppImage build and provenance](packaging/appimage/README.md)
+- [Project metadata and dependencies](pyproject.toml)
 
-- **Storage** shows per-device read and write rates from Linux `/proc/diskstats` and identifies devices through sysfs. The sidebar lists whole drives and relevant mounted logical devices. Partition space appears in **Mounted filesystems**, and unused pseudo-devices are omitted. Device active time is the share of the sampling interval spent handling I/O. Capacity and device-scoped hwmon temperature depend on information exposed by the device and driver; SMART telemetry is not collected.
-- **Mounted filesystems** shows local filesystem capacity from Linux mount information and filesystem statistics. Related mounts use a representative mount point when their filesystem identity can be established. Filesystem usage is separate from block-device counters, including for Btrfs, partitions, and logical volumes. Remote and pseudo filesystems are omitted.
-- **Network** shows receive and transmit rates from Linux per-interface counters, with interface type and link state from Linux metadata and psutil. Local link speed, when exposed, describes the interface and is not its current throughput. **Show loopback and virtual** reveals auxiliary interfaces hidden by default. Each interface has its own readings. Traffic may be visible on both a bridge or virtual interface and an underlying link, so the per-interface readings should not be summed as an aggregate.
-- Throughput uses binary byte-per-second units. Rates resume after a new baseline is available, and a temporarily unavailable counter is shown as unavailable. Telemetry uses read-only Linux interfaces and reflects devices visible to the running user.
+## Branding
 
-## Export a system report
-
-Choose **Export System Report…**, select the diagnostic sections and output format, then choose a destination. Collection and export run in the background. Privacy-Protected Diagnostics is the default. Full Diagnostics includes more identifiers and requires confirmation. Always review a report before sharing: automated redaction cannot guarantee removal of every sensitive value. Passwords, tokens, private keys and credential-file contents are not intentionally collected.
-
-Markdown, formatted JSON, JSON Lines and standalone HTML use the same collected snapshot. **All formats** saves a ZIP with one file of each type. JSON contains the schema-versioned snapshot with metadata, selected sections, section data and errors. JSON Lines schema version 1 remains unchanged: one JSON object per line with `schema_version`, `record_type`, `section`, `timestamp`, and `data`; records describe metadata, selected sections, and collection errors. Missing values are represented as null where applicable. Availability depends on the Linux interfaces and permissions of the desktop user.
-
-## Development checks
-
-```bash
-.venv/bin/python -m pip install -e '.[dev]'
-.venv/bin/python -m pytest
-.venv/bin/pyright
-```
-
-The tests default to Qt's offscreen backend. To test the X11 backend under a temporary X server, run `QT_QPA_PLATFORM=xcb xvfb-run -a .venv/bin/python -m pytest`.
+The logo above is the official [TaskPuppy Kreations artwork](assets/TaskPuppyLogo.png). AppImage and launcher packaging use a separate [launcher icon](assets/branding/appimage-icon.png); the original in-app logo remains unchanged.
