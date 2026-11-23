@@ -26,7 +26,8 @@ repositories and several apt package versions remain mutable, and Python
 packages are not hash locked. The manifest records installed package versions.
 The source snapshot identifies source inputs; it does not establish byte-for-byte
 reproducible binaries. Process priority and affinity operations have a separate
-PID-reuse safety question that requires a pre-public-release decision.
+PID-reuse safety question. Priority and affinity mutations are disabled in this
+release to avoid that process-identity risk; monitoring remains available.
 
 The AppDir keeps the standalone `.dist` layout intact. Its `AppRun` prepends
 the bundled desktop-data directory to `XDG_DATA_DIRS` and sets
@@ -44,6 +45,20 @@ An unintegrated AppImage can report that the desktop portal cannot find the
 `taskpup` app ID: the portal service searches its own host desktop database,
 not the AppImage process's `XDG_DATA_DIRS`. This warning was nonfatal on LMDE 7;
 the save dialog and exports worked. No desktop entry is installed automatically.
+
+Use **Add to Application Menu** inside the AppImage to explicitly create a
+user-local launcher and icon. Existing TaskPup launchers are left untouched.
+If the AppImage is moved, remove `taskpup-appimage.desktop` from your XDG data
+home's `applications` directory and `taskpup-appimage.png` from its
+`icons/hicolor/256x256/apps` directory, then add it again. These two files are
+also sufficient to remove this integration. Source launches cannot install it.
+The icon is created before the launcher, and both destinations use exclusive
+creation. If installation fails partway through, TaskPup leaves destination
+files untouched and lists their exact paths in the error dialog. Inspect those
+paths and remove a file only if you can verify it is a partial file from that
+failed attempt; keep existing files. Same-user processes can still change these
+paths during installation, so TaskPup cannot safely determine ownership for an
+automatic rollback.
 
 Generated standalone output, AppDir, manifest, checksum, and AppImage are written
 under the ignored `build/` directory. The build stops instead of overwriting an

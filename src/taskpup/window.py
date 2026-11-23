@@ -17,6 +17,7 @@ from taskpup.dashboard import PerformanceDashboard
 from taskpup.metrics import SystemSample
 from taskpup.model import COLUMNS, WIDTHS, ProcessModel
 from taskpup.platform import logo_path, open_executable_location, start_task
+from taskpup.menu_integration import MenuIntegrationError, install_appimage_menu
 from taskpup.processes import Identity, ProcessRow, Resources, Snapshot
 from taskpup.refresh import RefreshController
 from taskpup.report_dialog import ReportDialog
@@ -103,6 +104,10 @@ class MainWindow(QMainWindow):
         brand_row.addLayout(brand_text)
         brand_row.setAlignment(brand_text, Qt.AlignmentFlag.AlignVCenter)
         brand_row.addStretch()
+        self.menu_integration_button = QPushButton("Add to Application Menu…")
+        self.menu_integration_button.setObjectName("secondary")
+        self.menu_integration_button.clicked.connect(self.add_to_application_menu)
+        brand_row.addWidget(self.menu_integration_button, alignment=Qt.AlignmentFlag.AlignVCenter)
         self.report_button = QPushButton("Export System Report…")
         self.report_button.setObjectName("secondary")
         self.report_button.setAccessibleName("Export system diagnostic report")
@@ -423,6 +428,21 @@ class MainWindow(QMainWindow):
         if action is not None:
             actions[action](row)
         menu.deleteLater()
+
+    def add_to_application_menu(self) -> None:
+        if QMessageBox.question(
+            self, "Add to Application Menu",
+            "Create a user-local TaskPup launcher and icon? If you move the AppImage, remove the launcher and add it again.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            path = install_appimage_menu()
+        except MenuIntegrationError as error:
+            QMessageBox.warning(self, "Application menu", str(error))
+        else:
+            QMessageBox.information(self, "Application menu", f"Launcher created at {path}.")
 
     def do_action(self, action: Callable[[], None], success: str | None = None) -> None:
         try:

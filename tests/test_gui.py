@@ -11,7 +11,7 @@ import time
 import pytest
 from PySide6.QtCore import QEventLoop, QItemSelectionModel, QObject, QPoint, QSettings, Qt, QTimer
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QLabel, QMenu, QPushButton
+from PySide6.QtWidgets import QApplication, QLabel, QMenu, QMessageBox, QPushButton
 
 from taskpup import app, dialogs, management
 from taskpup.metrics import MemorySample, SwapSample, SystemSample, SystemSampler
@@ -62,6 +62,55 @@ def row(pid: int, name: str, *, parent: int = 0, uid: int = 1000, start: int = 1
 
 def snapshot(*rows: ProcessRow) -> Snapshot:
     return Snapshot(rows, Resources(20.5, 43.3, None))
+
+
+def test_menu_integration_requires_consent(window: MainWindow, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.StandardButton.No)
+    monkeypatch.setattr("taskpup.window.install_appimage_menu", lambda: pytest.fail("installation without consent"))
+    window.add_to_application_menu()
+
+
+def test_menu_integration_failure_displays_partial_recovery(window: MainWindow, monkeypatch: pytest.MonkeyPatch) -> None:
+    from taskpup.menu_integration import MenuIntegrationError
+
+    message = (
+        "Launcher creation failed. These destination paths were left untouched:\n"
+        "  /tmp/taskpup-test/applications/taskpup-appimage.desktop\n"
+        "Manual recovery: inspect the path and remove it only if verified as a partial file."
+    )
+
+    def fail_install() -> Path:
+        raise MenuIntegrationError(message)
+
+    monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr("taskpup.window.install_appimage_menu", fail_install)
+    shown: list[str] = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args: shown.append(str(args[2])))
+    window.menu_integration_button.click()
+    assert shown == [message]
+
+
+def test_menu_integration_confirmed_creates_launcher(window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from taskpup import menu_integration
+
+    image = tmp_path / "Task Pup.AppImage"
+    image.write_bytes(b"fixture")
+    image.chmod(0o755)
+    icon = tmp_path / "icon.png"
+    icon.write_bytes(b"icon")
+    monkeypatch.setenv("APPIMAGE", str(image))
+    monkeypatch.setenv("TASKPUP_APPIMAGE_ICON", str(icon))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setenv("XDG_DATA_DIRS", str(tmp_path / "system"))
+    monkeypatch.delenv("DESKTOPINTEGRATION", raising=False)
+    monkeypatch.setattr(menu_integration.psutil, "process_iter", lambda *_: [])
+    monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.StandardButton.Yes)
+    messages: list[str] = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *args: messages.append(str(args[2])))
+    window.menu_integration_button.click()
+    assert (tmp_path / "data/applications/taskpup-appimage.desktop").is_file()
+    assert (tmp_path / "data/icons/hicolor/256x256/apps/taskpup-appimage.png").read_bytes() == b"icon"
+    assert messages and "Launcher created" in messages[0]
 
 
 def test_context_menu_omits_scheduling_mutations(window: MainWindow) -> None:
