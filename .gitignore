@@ -5,3 +5,7 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+
+# Local AI agent usage policies
+CODEX-USAGE-SUBAGENT-POLICY*.MD
+MODEL-NEUTRAL-USAGE-SUBAGENT-POLICY*.MD
