@@ -42,6 +42,7 @@ SHOW_PROPERTIES = (
     "RefuseManualStop",
     "RequiredBy",
     "PartOf",
+    "ConsistsOf",
 )
 
 SCOPE_LABELS: dict[ServiceScope, str] = {
@@ -168,6 +169,7 @@ class LoadedServiceEntry:
     refuse_manual_stop: bool | None = None
     required_by: tuple[str, ...] | None = None
     part_of: tuple[str, ...] | None = None
+    consists_of: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,6 +204,7 @@ class ServiceRecord:
     refuse_manual_stop: bool | None = None
     required_by: tuple[str, ...] | None = None
     part_of: tuple[str, ...] | None = None
+    consists_of: tuple[str, ...] | None = None
 
     @property
     def scope(self) -> ServiceScope:
@@ -482,6 +485,7 @@ def parse_show_output(text: str) -> list[LoadedServiceEntry]:
                     refuse_manual_stop=_parse_bool(block.get("RefuseManualStop")),
                     required_by=_parse_list(block.get("RequiredBy")),
                     part_of=_parse_list(block.get("PartOf")),
+                    consists_of=_parse_list(block.get("ConsistsOf")),
                 )
             )
         block.clear()
@@ -582,6 +586,7 @@ def merge_scope_services(
                     refuse_manual_stop=live.refuse_manual_stop,
                     required_by=live.required_by,
                     part_of=live.part_of,
+                    consists_of=live.consists_of,
                 )
             )
         elif installed is not None:
@@ -789,6 +794,7 @@ def _merge_loaded_metadata(
         refuse_manual_stop=detail.refuse_manual_stop,
         required_by=detail.required_by,
         part_of=detail.part_of,
+        consists_of=detail.consists_of,
     )
 
 

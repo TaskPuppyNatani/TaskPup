@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 import psutil
 
+from taskpup.platform import DesktopEntryTooLarge, _read_regular_desktop_entry
+
 
 class MenuIntegrationError(Exception):
     """An integration failure suitable for display to the user."""
@@ -72,8 +74,28 @@ def install_appimage_menu() -> Path:
         for entry in (item for root in roots for item in root.glob("*.desktop")):
             parser = ConfigParser(interpolation=None, strict=False)
             try:
-                with entry.open(encoding="utf-8") as stream:
-                    parser.read_file(stream)
+                try:
+                    content = _read_regular_desktop_entry(entry)
+                except DesktopEntryTooLarge as error:
+                    raise MenuIntegrationError(
+                        _failure_message(
+                            f"Cannot check oversized desktop entry: {entry}. Review it before installing.",
+                            [],
+                        )
+                    ) from error
+                except OSError as error:
+                    if isinstance(error, FileNotFoundError) and not entry.is_symlink():
+                        continue
+                    raise MenuIntegrationError(
+                        _failure_message(
+                            f"Could not read existing desktop entry {entry} during conflict check: {error}. "
+                            "Fix its permissions or remove the unreadable entry, then retry.",
+                            [],
+                        )
+                    ) from error
+                if content is None:
+                    continue
+                parser.read_string(content)
                 section = parser["Desktop Entry"]
                 existing_exec = section.get("Exec", "")
                 if (section.get("Name", "").strip().casefold() == "taskpup"

@@ -12,14 +12,17 @@ from PySide6.QtWidgets import (
     QPushButton, QScrollArea, QSplitter, QTreeView, QVBoxLayout, QWidget,
 )
 
-from taskpup import dialogs
+from taskpup import dialogs, service_controls
 from taskpup.service_controls import (
     ACTION_LABELS,
     ACTION_PRESENT_PARTICIPLES,
     SERVICE_ACTIONS,
     ServiceAction,
     ServiceOperationResult,
+    _has_sufficient_metadata,
     assess_service_risk,
+    confirm_snapshot,
+    confirmation_matches,
     evaluate_service_actions,
 )
 from taskpup.services import (
@@ -353,7 +356,7 @@ class ServiceDetailsPanel(QFrame):
 
 class ServicesPage(QWidget):
     refresh_requested = Signal()
-    action_requested = Signal(object, str, bool)
+    action_requested = Signal(object, str, object)
 
     def __init__(self) -> None:
         super().__init__()
@@ -618,8 +621,44 @@ class ServicesPage(QWidget):
             self._show_feedback("warning", availability.reason or "Requested action is not available.", dismissible=True)
             self.update_action_buttons()
             return
-        risk = assess_service_risk(record, action)
-        if not dialogs.confirm_service_action(self, record, action, risk):
+        confirm_record = record
+        if action in {"stop", "restart", "disable"} and not record.loaded:
+            try:
+                authoritative = service_controls.query_service_state(record.identity)
+            except Exception:
+                authoritative = None
+            if authoritative is None or authoritative.identity != record.identity:
+                self._show_feedback(
+                    "warning",
+                    f"Refused to {action} {record.unit}: authoritative service metadata could not be verified. Refresh and try again.",
+                    dismissible=True,
+                )
+                self.update_action_buttons()
+                return
+            auth_availability = evaluate_service_actions(authoritative)[action]
+            if not auth_availability.allowed:
+                self._show_feedback(
+                    "warning",
+                    auth_availability.reason or "Requested action is not available.",
+                    dismissible=True,
+                )
+                self.update_action_buttons()
+                return
+            metadata_ok, metadata_reason = _has_sufficient_metadata(authoritative, action)
+            if not metadata_ok:
+                self._show_feedback(
+                    "warning",
+                    f"Refused to {action} {record.unit}: {metadata_reason}",
+                    dismissible=True,
+                )
+                self.update_action_buttons()
+                return
+            confirm_record = authoritative
+        if self.operation_in_progress is not None:
+            return
+        risk = assess_service_risk(confirm_record, action)
+        confirmation = confirm_snapshot(confirm_record, action, risk.level == "high")
+        if not dialogs.confirm_service_action(self, confirm_record, action, risk):
             return
         # Guard against concurrent operation start or stale selection change while confirmation was open.
         if self.operation_in_progress is not None:
@@ -642,15 +681,20 @@ class ServicesPage(QWidget):
             self.update_action_buttons()
             return
         current_risk = assess_service_risk(current, action)
-        if current_risk.level == "high" and risk.level != "high":
+        current_confirmation = confirm_snapshot(current, action, current_risk.level == "high")
+        if (current_risk.level == "high" and risk.level != "high") or (
+            action in {"stop", "restart", "disable"}
+            and (current.loaded or confirm_record is record)
+            and not confirmation_matches(confirmation, current_confirmation)
+        ):
             self._show_feedback(
                 "warning",
-                f"{record.unit} now requires high-risk confirmation; review its updated state and try again.",
+                f"{record.unit} changed while confirming; review its updated risk and confirm again.",
                 dismissible=True,
             )
             self.update_action_buttons()
             return
-        self.action_requested.emit(record.identity, action, risk.level == "high")
+        self.action_requested.emit(confirm_record.identity, action, confirmation)
 
     def set_operation_started(self, identity: ServiceIdentity, action: str) -> None:
         if action not in SERVICE_ACTIONS:

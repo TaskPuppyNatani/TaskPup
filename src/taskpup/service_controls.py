@@ -157,6 +157,48 @@ class ActionAvailability:
 
 
 @dataclass(frozen=True, slots=True)
+class ServiceConfirmation:
+    identity: ServiceIdentity
+    action: ServiceAction
+    required_by: frozenset[str] | None
+    part_of: frozenset[str] | None
+    consists_of: frozenset[str] | None
+    high_risk: bool
+
+
+def confirm_snapshot(record: ServiceRecord, action: ServiceAction, high_risk: bool) -> ServiceConfirmation:
+    def canonical(values: tuple[str, ...] | None) -> frozenset[str] | None:
+        return None if values is None else frozenset(values)
+
+    return ServiceConfirmation(
+        record.identity,
+        action,
+        canonical(record.required_by),
+        canonical(record.part_of),
+        canonical(record.consists_of) if action in {"stop", "restart"} else None,
+        high_risk,
+    )
+
+
+def confirmation_matches(
+    confirmation: ServiceConfirmation | None,
+    actual: ServiceConfirmation,
+) -> bool:
+    """Check whether a typed confirmation still matches relevant dependencies and risk for its action."""
+    if not isinstance(confirmation, ServiceConfirmation):
+        return False
+    if confirmation.identity != actual.identity or confirmation.action != actual.action:
+        return False
+    if confirmation.required_by != actual.required_by or confirmation.part_of != actual.part_of:
+        return False
+    if actual.action in {"stop", "restart"} and confirmation.consists_of != actual.consists_of:
+        return False
+    if actual.high_risk and not confirmation.high_risk:
+        return False
+    return True
+
+
+@dataclass(frozen=True, slots=True)
 class RiskAssessment:
     level: RiskLevel
     category: str | None = None
@@ -297,6 +339,16 @@ def assess_service_risk(
             warnings.append(f"Part of unit group: {parents}.")
             if category is None:
                 category = "Dependent System Units"
+        if action in {"stop", "restart"}:
+            if record.consists_of:
+                dependents = ", ".join(record.consists_of)
+                warnings.append(f"Consists of dependent units that may also be stopped: {dependents}.")
+                if category is None:
+                    category = "Dependent System Units"
+            elif record.consists_of is None:
+                warnings.append("Dependent unit impact is unknown because ConsistsOf metadata is unavailable.")
+                if category is None:
+                    category = "Dependent System Units"
 
     level: RiskLevel = "high" if warnings else "normal"
     return RiskAssessment(
@@ -490,6 +542,7 @@ def query_service_state(
         refuse_manual_stop=match.refuse_manual_stop,
         required_by=match.required_by,
         part_of=match.part_of,
+        consists_of=match.consists_of,
     )
 
 
@@ -684,6 +737,8 @@ def _has_sufficient_metadata(record: ServiceRecord, action: ServiceAction) -> tu
             missing_deps.append("RequiredBy")
         if record.part_of is None:
             missing_deps.append("PartOf")
+        if action in {"stop", "restart"} and record.consists_of is None:
+            missing_deps.append("ConsistsOf")
         if missing_deps:
             joined = " and ".join(missing_deps)
             verb = "is" if len(missing_deps) == 1 else "are"
@@ -700,7 +755,7 @@ def execute_service_action(
     action: ServiceAction,
     stop: Event | None = None,
     *,
-    high_risk_acknowledged: bool = False,
+    high_risk_acknowledged: ServiceConfirmation | None = None,
     runner: CommandRunner = run_systemctl,
     timeout: float = OPERATION_TIMEOUT,
     verify_timeout: float = DEFAULT_TIMEOUT,
@@ -785,7 +840,16 @@ def execute_service_action(
             summary=f"Operation blocked for {identity.unit}: {reason}",
             verified_record=pre_record,
         )
-    if risk.level == "high" and not high_risk_acknowledged:
+    if action in {"stop", "restart", "disable"}:
+        actual = confirm_snapshot(pre_record, action, risk.level == "high")
+        if not confirmation_matches(high_risk_acknowledged, actual):
+            return ServiceOperationResult(
+                identity, action, "failed",
+                f"Confirmation is stale for {identity.unit}; refresh and confirm again.",
+                detail="\n".join(risk.warnings) or "Current assessment: normal risk.",
+                verified_record=pre_record,
+            )
+    if risk.level == "high" and (not isinstance(high_risk_acknowledged, ServiceConfirmation) or not high_risk_acknowledged.high_risk):
         return ServiceOperationResult(
             identity=identity,
             action=action,

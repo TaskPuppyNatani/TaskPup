@@ -4,6 +4,7 @@ from configparser import ConfigParser, Error
 import os
 from pathlib import Path
 import shlex
+import stat
 
 from PySide6.QtCore import QProcess, QUrl
 from PySide6.QtGui import QDesktopServices
@@ -11,6 +12,42 @@ import psutil
 
 from taskpup.management import ProcessActionError, check_identity
 from taskpup.processes import Identity
+
+
+_MAX_DESKTOP_ENTRY_BYTES = 1024 * 1024
+
+
+class DesktopEntryTooLarge(Exception):
+    """A desktop entry exceeds the scan limit."""
+
+
+def _read_regular_desktop_entry(path: Path) -> str | None:
+    """Read a bounded regular desktop file without blocking on a special file.
+
+    Returns ``None`` for non-regular files (such as FIFOs or directories),
+    raises ``DesktopEntryTooLarge`` when the entry exceeds the scan limit, and
+    propagates ``OSError`` or ``UnicodeError`` to callers.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
+    descriptor = os.open(path, flags)
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            return None
+        if metadata.st_size > _MAX_DESKTOP_ENTRY_BYTES:
+            raise DesktopEntryTooLarge(str(path))
+
+        content = bytearray()
+        while len(content) <= _MAX_DESKTOP_ENTRY_BYTES:
+            chunk = os.read(descriptor, min(65536, _MAX_DESKTOP_ENTRY_BYTES + 1 - len(content)))
+            if not chunk:
+                break
+            content.extend(chunk)
+        if len(content) > _MAX_DESKTOP_ENTRY_BYTES:
+            raise DesktopEntryTooLarge(str(path))
+        return content.decode("utf-8")
+    finally:
+        os.close(descriptor)
 
 
 def logo_path() -> Path:
@@ -35,10 +72,12 @@ def desktop_icons() -> dict[str, str]:
                 continue
             parser = ConfigParser(interpolation=None, strict=False)
             try:
-                with path.open(encoding="utf-8") as stream:
-                    parser.read_file(stream)
+                content = _read_regular_desktop_entry(path)
+                if content is None:
+                    continue
+                parser.read_string(content)
                 entry = parser["Desktop Entry"]
-            except (OSError, UnicodeError, Error, KeyError):
+            except (OSError, UnicodeError, Error, KeyError, DesktopEntryTooLarge):
                 continue
             seen.add(desktop_id)
             icon = entry.get("Icon", "")

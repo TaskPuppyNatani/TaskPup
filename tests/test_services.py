@@ -141,6 +141,34 @@ def test_parse_show_output_handles_properties_equals_and_non_services() -> None:
     assert second.triggered_by == ()
     assert second.required_by is None
     assert second.part_of is None
+    assert second.consists_of is None
+
+
+def test_parse_show_output_preserves_consists_of_empty_populated_and_unavailable_states() -> None:
+    raw = "\n".join(
+        [
+            "Id=parent.service",
+            "ConsistsOf=child.service another-child.service",
+            "RequiredBy=",
+            "PartOf=",
+            "",
+            "Id=empty.service",
+            "ConsistsOf=   ",
+            "",
+            "Id=missing.service",
+            "",
+            "Id=unavailable.service",
+            "ConsistsOf=n/a",
+        ]
+    )
+
+    entries = {entry.unit: entry for entry in parse_show_output(raw)}
+    assert entries["parent.service"].consists_of == ("child.service", "another-child.service")
+    assert entries["parent.service"].required_by == ()
+    assert entries["parent.service"].part_of == ()
+    assert entries["empty.service"].consists_of == ()
+    assert entries["missing.service"].consists_of is None
+    assert entries["unavailable.service"].consists_of is None
 
 
 def test_parse_unit_files_json_filters_services_and_rejects_malformed() -> None:
@@ -351,7 +379,8 @@ def test_discover_scope_enumerates_via_list_units_and_uses_explicit_batched_show
         "ssh.service": (
             "Id=ssh.service\nDescription=OpenBSD Secure Shell server\nLoadState=loaded\n"
             "ActiveState=active\nSubState=running\nUnitFileState=enabled\nUnitFilePreset=enabled\n"
-            "FragmentPath=/usr/lib/systemd/system/ssh.service\nMainPID=900\nType=notify\nTransient=no\nResult=success"
+            "FragmentPath=/usr/lib/systemd/system/ssh.service\nMainPID=900\nType=notify\nTransient=no\nResult=success\n"
+            "RequiredBy=\nPartOf=\nConsistsOf=ssh-helper.service"
         ),
         "casper-md5check.service": (
             "Id=casper-md5check.service\nDescription=Verify Live ISO checksums\nLoadState=loaded\n"
@@ -405,6 +434,9 @@ def test_discover_scope_enumerates_via_list_units_and_uses_explicit_batched_show
     assert by_unit["ssh.service"].enablement_label == "Enabled"
     assert by_unit["ssh.service"].main_pid == 900
     assert by_unit["ssh.service"].fragment_path == "/usr/lib/systemd/system/ssh.service"
+    assert by_unit["ssh.service"].required_by == ()
+    assert by_unit["ssh.service"].part_of == ()
+    assert by_unit["ssh.service"].consists_of == ("ssh-helper.service",)
 
     assert by_unit["casper-md5check.service"].loaded is True
     assert by_unit["casper-md5check.service"].state_label == "Failed"
