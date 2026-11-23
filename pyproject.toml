@@ -36,3 +36,10 @@ pythonPlatform = "Linux"
 venvPath = "."
 venv = ".venv"
 typeCheckingMode = "standard"
+
+[tool.pyside6.deploy]
+title = "taskpup"
+input_file = "main.py"
+exec_directory = "build/appimage/standalone"
+mode = "standalone"
+extra_args = "--file-reference-choice=runtime --include-data-files=assets/TaskPuppyLogo.png=taskpup/TaskPuppyLogo.png"

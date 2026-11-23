@@ -17,7 +17,7 @@ from typing import Any, TypeGuard
 import zipfile
 
 
-_REPORT_MEMBERS = ("report.md", "report.jsonl", "report.html")
+_REPORT_MEMBERS = ("report.md", "report.json", "report.jsonl", "report.html")
 _MARKDOWN_SPECIAL = frozenset("\\`*_{}[]!|~")
 _LABEL_ABBREVIATIONS = {
     "api": "API",
@@ -1601,7 +1601,9 @@ def render_markdown(snapshot: dict[str, Any]) -> str:
     errors = snapshot["errors"]
     lines.extend(["", "## Collection Errors", ""])
     lines.extend(_md_render_errors(errors))
-    return "\n".join(lines).rstrip() + "\n"
+    result = "\n".join(lines).rstrip() + "\n"
+    result = re.sub(r"&lt;device-(\d+)&gt;-partition-(\d+)", r"Device \1, Partition \2", result)
+    return re.sub(r"&lt;device-(\d+)&gt;", r"Device \1", result)
 
 
 def render_jsonl(snapshot: dict[str, Any]) -> str:
@@ -1640,6 +1642,12 @@ def render_jsonl(snapshot: dict[str, Any]) -> str:
         for error in snapshot["errors"]
     )
     return "".join(_json_dumps(record) + "\n" for record in records)
+
+
+def render_json(snapshot: dict[str, Any]) -> str:
+    """Render the sanitized, schema-versioned snapshot as formatted JSON."""
+    _validate_snapshot(snapshot)
+    return _json_dumps(snapshot, indent=2) + "\n"
 
 
 _HTML_SECTION_TITLES = {
@@ -5288,6 +5296,7 @@ def render_html(snapshot: dict[str, Any]) -> str:
 def _make_zip(snapshot: dict[str, Any]) -> bytes:
     reports = (
         ("report.md", render_markdown(snapshot)),
+        ("report.json", render_json(snapshot)),
         ("report.jsonl", render_jsonl(snapshot)),
         ("report.html", render_html(snapshot)),
     )
@@ -5391,7 +5400,7 @@ def write_report(
 ) -> None:
     """Render and atomically write one report format to ``destination``.
 
-    ``format`` is one of ``md``, ``jsonl``, ``html`` or ``zip``. By default an
+    ``format`` is one of ``md``, ``json``, ``jsonl``, ``html`` or ``zip``. By default an
     existing destination is preserved. Callers should set ``overwrite=True``
     only after the user has explicitly approved replacement in the UI.
     """
@@ -5400,6 +5409,8 @@ def write_report(
         raise TypeError("overwrite must be a bool")
     if format == "md":
         payload = render_markdown(snapshot).encode("utf-8")
+    elif format == "json":
+        payload = render_json(snapshot).encode("utf-8")
     elif format == "jsonl":
         payload = render_jsonl(snapshot).encode("utf-8")
     elif format == "html":
@@ -5407,6 +5418,6 @@ def write_report(
     elif format == "zip":
         payload = _make_zip(snapshot)
     else:
-        raise ValueError("format must be one of: md, jsonl, html, zip")
+        raise ValueError("format must be one of: md, json, jsonl, html, zip")
     _atomic_write(Path(destination), payload, overwrite=overwrite)
 

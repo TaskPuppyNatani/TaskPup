@@ -216,14 +216,33 @@ while True:
                     parent.wait(timeout=3)
 
 
-def test_change_scheduling_and_force_kill_isolated_child(sleeper: subprocess.Popen) -> None:
+@pytest.mark.parametrize("identity", [Identity(-1, 0), Identity(1, 0), Identity(99999999, -1)])
+def test_scheduling_mutations_are_disabled(identity: Identity, monkeypatch: pytest.MonkeyPatch) -> None:
+    def unexpected(*args: object) -> None:
+        pytest.fail("Scheduling mutation syscall was invoked")
+
+    monkeypatch.setattr(os, "setpriority", unexpected)
+    monkeypatch.setattr(os, "sched_setaffinity", unexpected)
+    with pytest.raises(management.ProcessActionError, match="disabled for process-identity safety"):
+        management.set_priority(identity, 0)
+    with pytest.raises(management.ProcessActionError, match="disabled for process-identity safety"):
+        management.set_affinity(identity, {0})
+
+
+def test_read_affinity_and_force_kill_isolated_child(sleeper: subprocess.Popen) -> None:
     stat = read_stat(sleeper.pid)
+    stale = replace(stat.identity, start_ticks=stat.identity.start_ticks - 1)
     cpus = management.get_affinity(stat.identity)
-    chosen = {min(cpus)}
-    management.set_affinity(stat.identity, chosen)
-    assert management.get_affinity(stat.identity) == chosen
-    if stat.nice < 19:
+    assert cpus == os.sched_getaffinity(sleeper.pid)
+    assert isinstance(stat.nice, int)
+    with pytest.raises(management.ProcessActionError, match="disabled for process-identity safety"):
         management.set_priority(stat.identity, stat.nice + 1)
-        assert read_stat(sleeper.pid).nice == stat.nice + 1
+    with pytest.raises(management.ProcessActionError, match="disabled for process-identity safety"):
+        management.set_affinity(stat.identity, cpus)
+    with pytest.raises(management.ProcessActionError, match="disabled for process-identity safety"):
+        management.set_priority(stale, 0)
+    with pytest.raises(management.ProcessActionError, match="disabled for process-identity safety"):
+        management.set_affinity(stale, set())
+    assert management.get_affinity(stat.identity) == cpus
     management.send_signal(stat.identity, signal.SIGKILL)
     assert sleeper.wait(timeout=3) == -signal.SIGKILL

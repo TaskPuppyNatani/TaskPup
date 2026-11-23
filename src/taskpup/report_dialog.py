@@ -17,6 +17,7 @@ from taskpup.report_render import write_report
 
 FORMATS = {
     "Markdown (.md)": ("md", "Markdown (*.md)"),
+    "JSON (.json)": ("json", "JSON (*.json)"),
     "JSON Lines (.jsonl)": ("jsonl", "JSON Lines (*.jsonl)"),
     "HTML (.html)": ("html", "HTML (*.html)"),
     "All formats (.zip)": ("zip", "ZIP archive (*.zip)"),
@@ -61,11 +62,11 @@ class ReportDialog(QDialog):
         self.format.addItems(list(FORMATS))
         self.format.currentIndexChanged.connect(self.update_summary)
         options.addWidget(self.format)
-        self.privacy = QCheckBox("Protect identifying information (recommended)")
+        self.privacy = QCheckBox("Privacy-Protected Diagnostics (recommended)")
         self.privacy.setChecked(True)
         self.privacy.toggled.connect(self.update_summary)
         options.addWidget(self.privacy)
-        warning = QLabel("Disabling protection includes additional identifiers. Passwords, tokens and private keys are never intentionally included. Automated redaction cannot guarantee removal of every sensitive value. Review the report before sharing it.")
+        warning = QLabel("Protected diagnostics mask identifiers. Uncheck for Full Diagnostics, which includes system identifiers. Passwords, tokens and private keys are never intentionally included. Automated redaction cannot guarantee removal of every sensitive value. Review the report before sharing it.")
         warning.setWordWrap(True)
         options.addWidget(warning)
         self.summary = QLabel()
@@ -98,6 +99,13 @@ class ReportDialog(QDialog):
     def start_export(self) -> None:
         selected = {key for key, box in self.sections.items() if box.isChecked()}
         if not selected or self.future is not None:
+            return
+        if not self.privacy.isChecked() and QMessageBox.question(
+            self, "Confirm Full Diagnostics",
+            "Full diagnostics may include usernames, local paths, network addresses, device identifiers and other sensitive system information. Review the report before sharing it.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        ) != QMessageBox.StandardButton.Yes:
             return
         extension, file_filter = FORMATS[self.format.currentText()]
         name = f"taskpup-system-report-{datetime.now(timezone.utc):%Y%m%d-%H%M%S-utc}.{extension}"

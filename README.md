@@ -20,7 +20,7 @@ If Python cannot create a virtual environment on LMDE, install the distribution'
 
 - Click column headers to sort. Use **Columns** to choose which columns to show. **Tree view** groups visible descendants beneath their parents.
 - Search by name, PID, user, or command. **My processes** shows processes owned by your user. Auto-refresh runs every 1.5 seconds. Press **F5** to sample immediately or **Ctrl+F** to focus search.
-- Right-click a process for properties, clipboard actions, its executable directory, priority, affinity, and signals. **End task** sends SIGTERM. **Force kill** sends SIGKILL. The tree actions show the exact PIDs that will be signaled, with children handled first.
+- Right-click a process for properties, clipboard actions, its executable directory, and signals. **End task** sends SIGTERM. **Force kill** sends SIGKILL. The tree actions show the exact PIDs that will be signaled, with children handled first.
 - **Run new task** (**Ctrl+N**) starts an executable with arguments from your home directory. Quote paths or arguments that contain spaces. Pipes, redirects, and expansions are passed as literal arguments.
 - The summary shows system CPU, RAM, swap, and the total number of processes visible to TaskPup in its latest valid system-wide snapshot. Search and ownership filters only affect the table. Per-process CPU shows usage in units of one logical CPU. A multithreaded process can exceed 100%.
 
@@ -28,7 +28,7 @@ TaskPup uses the desktop user's permissions and refuses to start as root. Signal
 
 Tree previews are built from a sequential scan of the Linux process table. TaskPup rechecks parent identities before previewing their descendants and sends signals only to the listed targets.
 
-Linux nice and CPU affinity settings apply to the process's main thread. The kernel APIs for these settings accept numeric IDs. TaskPup checks identity and liveness around the calls, but process exit and PID reuse can still race a numeric update. Linux may restrict CPU affinity based on the process's cpuset.
+Priority and CPU-affinity changes are unavailable in this release to avoid a process-identity race when Linux reuses a PID. Monitoring and supported pidfd-based signaling remain available. Read-only affinity queries use numeric IDs and can race process exit and reuse.
 
 The terminal launcher is the verified startup path on Cinnamon/X11. TaskPup supplies its desktop ID to Qt when a matching `taskpup.desktop` is installed. Live registration through an installed desktop entry is unverified.
 
@@ -52,9 +52,9 @@ The terminal launcher is the verified startup path on Cinnamon/X11. TaskPup supp
 
 ## Export a system report
 
-Choose **Export System Report…**, select the diagnostic sections and output format, then choose a destination. Collection and export run in the background. Privacy protection is enabled by default. Disabling it includes more identifiers. Always review a report before sharing: automated redaction cannot guarantee removal of every sensitive value. Passwords, tokens, private keys and credential-file contents are not intentionally collected.
+Choose **Export System Report…**, select the diagnostic sections and output format, then choose a destination. Collection and export run in the background. Privacy-Protected Diagnostics is the default. Full Diagnostics includes more identifiers and requires confirmation. Always review a report before sharing: automated redaction cannot guarantee removal of every sensitive value. Passwords, tokens, private keys and credential-file contents are not intentionally collected.
 
-Markdown, JSON Lines and standalone HTML use the same collected snapshot. **All formats** saves a ZIP with one file of each type. JSON Lines schema version 1 uses one JSON object per line with `schema_version`, `record_type`, `section`, `timestamp`, and `data`; records describe metadata, selected sections, and collection errors. Missing values are represented as null where applicable. Availability depends on the Linux interfaces and permissions of the desktop user.
+Markdown, formatted JSON, JSON Lines and standalone HTML use the same collected snapshot. **All formats** saves a ZIP with one file of each type. JSON contains the schema-versioned snapshot with metadata, selected sections, section data and errors. JSON Lines schema version 1 remains unchanged: one JSON object per line with `schema_version`, `record_type`, `section`, `timestamp`, and `data`; records describe metadata, selected sections, and collection errors. Missing values are represented as null where applicable. Availability depends on the Linux interfaces and permissions of the desktop user.
 
 ## Development checks
 

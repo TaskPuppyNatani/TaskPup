@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=TaskPup
+GenericName=Linux process and system manager
+Comment=Monitor and manage Linux processes, system services, and hardware
+Exec=AppRun
+TryExec=AppRun
+Icon=taskpup
+Terminal=false
+Categories=System;Monitor;
+StartupNotify=true
+StartupWMClass=TaskPup
