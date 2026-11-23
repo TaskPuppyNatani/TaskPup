@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+from dataclasses import replace
 from threading import Event
 
 import pytest
@@ -10,6 +11,8 @@ from taskpup.service_controls import (
     build_control_command,
     evaluate_service_actions,
     execute_service_action,
+    ServiceAction,
+    confirm_snapshot,
     validate_service_unit,
 )
 from taskpup.services import (
@@ -38,6 +41,7 @@ def make_record(
     triggered_by: tuple[str, ...] | None = (),
     required_by: tuple[str, ...] | None = (),
     part_of: tuple[str, ...] | None = (),
+    consists_of: tuple[str, ...] | None = (),
 ) -> ServiceRecord:
     return ServiceRecord(
         identity=ServiceIdentity(scope, unit),
@@ -55,6 +59,7 @@ def make_record(
         triggered_by=triggered_by,
         required_by=required_by,
         part_of=part_of,
+        consists_of=consists_of,
     )
 
 
@@ -136,6 +141,7 @@ def test_parse_show_output_captures_capability_and_dependency_properties() -> No
             "TriggeredBy=pk-debconf-helper.socket",
             "RequiredBy=multi-user.target",
             "PartOf=graphical-session.target",
+            "ConsistsOf=pk-debconf-helper-child.service",
         ]
     )
     entries = parse_show_output(raw)
@@ -148,6 +154,7 @@ def test_parse_show_output_captures_capability_and_dependency_properties() -> No
     assert entry.triggered_by == ("pk-debconf-helper.socket",)
     assert entry.required_by == ("multi-user.target",)
     assert entry.part_of == ("graphical-session.target",)
+    assert entry.consists_of == ("pk-debconf-helper-child.service",)
 
 
 def test_evaluate_service_actions_honors_systemd_semantics_and_protections() -> None:
@@ -254,6 +261,23 @@ def test_assess_service_risk_classifies_critical_dependencies_and_triggers() -> 
     assert assess_service_risk(brltty, "start", current_uid=1000).level == "normal"
 
 
+@pytest.mark.parametrize("action", ["stop", "restart"])
+def test_consists_of_children_are_named_in_disruptive_risk_confirmation(action: str) -> None:
+    parent = make_record(
+        "parent.service",
+        required_by=(),
+        part_of=(),
+        consists_of=("worker.service",),
+    )
+
+    risk = assess_service_risk(parent, action, current_uid=1000)  # type: ignore[arg-type]
+
+    assert risk.level == "high"
+    assert risk.category == "Dependent System Units"
+    assert any("worker.service" in warning for warning in risk.warnings)
+    assert any("Consists of dependent units" in warning for warning in risk.warnings)
+
+
 def _show_block(
     unit: str,
     *,
@@ -267,6 +291,7 @@ def _show_block(
     refuse_stop: str = "no",
     required_by: str | None = "",
     part_of: str | None = "",
+    consists_of: str | None = "",
 ) -> str:
     lines = [
         f"Id={unit}",
@@ -287,6 +312,8 @@ def _show_block(
         lines.append(f"RequiredBy={required_by}")
     if part_of is not None:
         lines.append(f"PartOf={part_of}")
+    if consists_of is not None:
+        lines.append(f"ConsistsOf={consists_of}")
     return "\n".join(lines) + "\n"
 
 
@@ -305,7 +332,7 @@ def test_p1_protected_services_blocked_at_execution_boundary_without_invoking_ru
         (ServiceIdentity("system", "systemd-logind.service"), "disable"),
         (ServiceIdentity("system", "user@1000.service"), "stop"),
     ):
-        for acknowledged in (False, True):
+        for acknowledged in (None, confirm_snapshot(make_record(identity.unit, scope=identity.scope), action, True)):  # type: ignore[arg-type]
             res = execute_service_action(
                 identity,
                 action,  # type: ignore[arg-type]
@@ -333,16 +360,16 @@ def test_p1_execution_boundary_enforces_high_risk_eligibility_capabilities_and_m
     blocked = execute_service_action(
         ServiceIdentity("system", "NetworkManager.service"),
         "stop",
-        high_risk_acknowledged=False,
+        high_risk_acknowledged=None,
         runner=nm_runner,
     )
-    assert blocked.outcome == "failed" and "high-risk" in blocked.summary.casefold()
+    assert blocked.outcome == "failed" and "confirmation" in blocked.summary.casefold()
     assert mutating_calls == []
 
     allowed = execute_service_action(
         ServiceIdentity("system", "NetworkManager.service"),
         "stop",
-        high_risk_acknowledged=True,
+        high_risk_acknowledged=confirm_snapshot(make_record("NetworkManager.service"), "stop", True),
         runner=nm_runner,
     )
     assert allowed.outcome == "succeeded"
@@ -363,7 +390,7 @@ def test_p1_execution_boundary_enforces_high_risk_eligibility_capabilities_and_m
     assert execute_service_action(ServiceIdentity("user", "dbus.service"), "stop", runner=user_dbus_runner).outcome == "failed"
     assert mutating_calls == []
     res = execute_service_action(
-        ServiceIdentity("user", "dbus.service"), "stop", high_risk_acknowledged=True, runner=user_dbus_runner,
+        ServiceIdentity("user", "dbus.service"), "stop", high_risk_acknowledged=confirm_snapshot(make_record("dbus.service", scope="user"), "stop", True), runner=user_dbus_runner,
     )
     assert res.outcome == "succeeded"
     assert mutating_calls == [("systemctl", "--user", "stop", "--", "dbus.service")]
@@ -382,7 +409,7 @@ def test_p1_execution_boundary_enforces_high_risk_eligibility_capabilities_and_m
         return CommandResult(0, "", "")
 
     res = execute_service_action(ServiceIdentity("system", "cups.service"), "stop", runner=required_by_runner)
-    assert res.outcome == "failed" and "high-risk" in res.summary.casefold()
+    assert res.outcome == "failed" and "confirmation" in res.summary.casefold()
     assert mutating_calls == []
 
     # 4. Caller bypassing GUI eligibility (already active start, restricted CanStart/CanStop, static enable).
@@ -404,7 +431,7 @@ def test_p1_execution_boundary_enforces_high_risk_eligibility_capabilities_and_m
         res = execute_service_action(
             ServiceIdentity("system", unit),
             action,  # type: ignore[arg-type]
-            high_risk_acknowledged=True,
+            high_risk_acknowledged=confirm_snapshot(make_record(unit), action, True),  # type: ignore[arg-type]
             runner=bypass_runner,
         )
         assert res.outcome == "failed", f"Expected {action} on {unit} to be rejected"
@@ -429,7 +456,7 @@ def test_p1_execution_boundary_enforces_high_risk_eligibility_capabilities_and_m
         res = execute_service_action(
             ServiceIdentity("system", unit),
             action,  # type: ignore[arg-type]
-            high_risk_acknowledged=True,
+            high_risk_acknowledged=confirm_snapshot(make_record(unit), action, True),  # type: ignore[arg-type]
             runner=bad_meta_runner,
         )
         assert res.outcome == "failed"
@@ -447,12 +474,14 @@ def test_p2_missing_dependency_metadata_rejects_disruptive_actions_and_preserves
                 "ActiveState=active",
                 "RequiredBy=",
                 "PartOf=   ",
+                "ConsistsOf=",
                 "",
                 "Id=populated.service",
                 "LoadState=loaded",
                 "ActiveState=active",
                 "RequiredBy=cups-browsed.service",
                 "PartOf=printing.target",
+                "ConsistsOf=worker.service",
                 "",
                 "Id=missing.service",
                 "LoadState=loaded",
@@ -463,18 +492,23 @@ def test_p2_missing_dependency_metadata_rejects_disruptive_actions_and_preserves
                 "ActiveState=active",
                 "RequiredBy=n/a",
                 "PartOf=n/a",
+                "ConsistsOf=n/a",
             ]
         )
     )
     by_unit = {entry.unit: entry for entry in parsed}
     assert by_unit["explicit-empty.service"].required_by == ()
     assert by_unit["explicit-empty.service"].part_of == ()
+    assert by_unit["explicit-empty.service"].consists_of == ()
     assert by_unit["populated.service"].required_by == ("cups-browsed.service",)
     assert by_unit["populated.service"].part_of == ("printing.target",)
+    assert by_unit["populated.service"].consists_of == ("worker.service",)
     assert by_unit["missing.service"].required_by is None
     assert by_unit["missing.service"].part_of is None
+    assert by_unit["missing.service"].consists_of is None
     assert by_unit["unavailable.service"].required_by is None
     assert by_unit["unavailable.service"].part_of is None
+    assert by_unit["unavailable.service"].consists_of is None
 
     # 1. Principal reproduction: successful but incomplete read-only `systemctl show` omitting RequiredBy
     # must NOT permit an unacknowledged Stop to reach the mutating command runner.
@@ -497,12 +531,45 @@ def test_p2_missing_dependency_metadata_rejects_disruptive_actions_and_preserves
     repro = execute_service_action(
         ServiceIdentity("system", "cups.service"),
         "stop",
-        high_risk_acknowledged=False,
+        high_risk_acknowledged=None,
         runner=omitted_required_by_runner,
     )
     assert repro.outcome == "failed"
     assert "RequiredBy" in repro.summary and "safely evaluated" in repro.summary.casefold()
     assert mutating_calls == []
+
+    # Stop/restart also require ConsistsOf, independently of RequiredBy and PartOf.
+    # Acknowledgement cannot override an unavailable reverse-dependency property.
+    for action in ("stop", "restart"):
+        missing_consists_of = _show_block(
+            "parent.service",
+            active="active",
+            sub="running",
+            unit_file="enabled",
+            required_by="",
+            part_of="",
+            consists_of=None,
+        )
+        for acknowledged in (None, confirm_snapshot(make_record("parent.service"), action, True)):  # type: ignore[arg-type]
+            mutating_calls.clear()
+
+            def missing_consists_runner(
+                args: Sequence[str], timeout: float, stop: Event | None, payload: str = missing_consists_of
+            ) -> CommandResult:
+                if "show" in args:
+                    return CommandResult(0, payload, "")
+                mutating_calls.append(tuple(args))
+                return CommandResult(0, "", "")
+
+            result = execute_service_action(
+                ServiceIdentity("system", "parent.service"),
+                action,  # type: ignore[arg-type]
+                high_risk_acknowledged=acknowledged,
+                runner=missing_consists_runner,
+            )
+            assert result.outcome == "failed"
+            assert "ConsistsOf" in result.summary and "safely evaluated" in result.summary
+            assert mutating_calls == []
 
     # 2. Missing RequiredBy only, missing PartOf only, both missing, or n/a -> blocked for stop/restart/disable,
     # and high_risk_acknowledged=True MUST NOT override missing mandatory metadata.
@@ -524,7 +591,7 @@ def test_p2_missing_dependency_metadata_rejects_disruptive_actions_and_preserves
                 required_by=required_by_val,
                 part_of=part_of_val,
             )
-            for acknowledged in (False, True):
+            for acknowledged in (None, confirm_snapshot(make_record("cups.service"), action, True)):  # type: ignore[arg-type]
                 mutating_calls.clear()
 
                 def incomplete_runner(
@@ -570,7 +637,7 @@ def test_p2_missing_dependency_metadata_rejects_disruptive_actions_and_preserves
     nm_res = execute_service_action(
         ServiceIdentity("system", "NetworkManager.service"),
         "stop",
-        high_risk_acknowledged=True,
+        high_risk_acknowledged=confirm_snapshot(make_record("NetworkManager.service"), "stop", True),
         runner=nm_incomplete_runner,
     )
     assert nm_res.outcome == "failed" and "RequiredBy" in nm_res.summary and "PartOf" in nm_res.summary
@@ -610,7 +677,7 @@ def test_p2_missing_dependency_metadata_rejects_disruptive_actions_and_preserves
         ok_res = execute_service_action(
             ServiceIdentity("system", "cups.service"),
             action,  # type: ignore[arg-type]
-            high_risk_acknowledged=False,
+            high_risk_acknowledged=confirm_snapshot(make_record("cups.service"), action, False),  # type: ignore[arg-type]
             runner=explicit_empty_runner,
         )
         assert ok_res.outcome == "succeeded"
@@ -649,16 +716,16 @@ def test_p2_missing_dependency_metadata_rejects_disruptive_actions_and_preserves
         unacked = execute_service_action(
             ServiceIdentity("system", "cups.service"),
             "stop",
-            high_risk_acknowledged=False,
+            high_risk_acknowledged=None,
             runner=populated_dep_runner,
         )
-        assert unacked.outcome == "failed" and "high-risk" in unacked.summary.casefold()
+        assert unacked.outcome == "failed" and "confirmation" in unacked.summary.casefold()
         assert mutating_calls == []
 
         acked = execute_service_action(
             ServiceIdentity("system", "cups.service"),
             "stop",
-            high_risk_acknowledged=True,
+            high_risk_acknowledged=confirm_snapshot(make_record("cups.service", required_by=tuple(required_by_val.split()), part_of=tuple(part_of_val.split())), "stop", True),
             runner=populated_dep_runner,
         )
         assert acked.outcome == "succeeded"
@@ -674,11 +741,252 @@ def test_p2_missing_dependency_metadata_rejects_disruptive_actions_and_preserves
     prot_res = execute_service_action(
         ServiceIdentity("system", "dbus.service"),
         "stop",
-        high_risk_acknowledged=True,
+        high_risk_acknowledged=confirm_snapshot(make_record("dbus.service"), "stop", True),
         runner=never_called,
     )
     assert prot_res.outcome == "failed" and "blocked" in prot_res.summary.casefold()
     assert protected_calls == []
+
+
+@pytest.mark.parametrize(
+    ("action", "post_active", "post_sub"),
+    [("stop", "inactive", "dead"), ("restart", "active", "running")],
+)
+def test_consists_of_parent_stop_restart_requires_execution_acknowledgement(
+    action: str, post_active: str, post_sub: str
+) -> None:
+    mutating_calls: list[tuple[str, ...]] = []
+
+    def runner(args: Sequence[str], timeout: float, stop: Event | None) -> CommandResult:
+        if "show" in args:
+            after_mutation = bool(mutating_calls)
+            return CommandResult(
+                0,
+                _show_block(
+                    "parent.service",
+                    active=post_active if after_mutation else "active",
+                    sub=post_sub if after_mutation else "running",
+                    unit_file="enabled",
+                    required_by="",
+                    part_of="",
+                    consists_of="worker.service",
+                ),
+                "",
+            )
+        mutating_calls.append(tuple(args))
+        return CommandResult(0, "", "")
+
+    unacknowledged = execute_service_action(
+        ServiceIdentity("system", "parent.service"),
+        action,  # type: ignore[arg-type]
+        high_risk_acknowledged=None,
+        runner=runner,
+    )
+    assert unacknowledged.outcome == "failed"
+    assert "confirmation" in unacknowledged.summary.casefold()
+    assert mutating_calls == []
+
+    acknowledged = execute_service_action(
+        ServiceIdentity("system", "parent.service"),
+        action,  # type: ignore[arg-type]
+        high_risk_acknowledged=confirm_snapshot(make_record("parent.service", consists_of=("worker.service",)), action, True),  # type: ignore[arg-type]
+        runner=runner,
+    )
+    assert acknowledged.outcome == "succeeded"
+    assert acknowledged.verified_record is not None
+    assert acknowledged.verified_record.consists_of == ("worker.service",)
+    assert mutating_calls == [("systemctl", "--system", action, "--", "parent.service")]
+
+
+@pytest.mark.parametrize(
+    ("approved", "actual", "allowed"),
+    [
+        (("a.service", "b.service"), "b.service a.service", True),
+        (("a.service",), "a.service b.service", False),
+        (("a.service", "b.service"), "a.service", False),
+        (("a.service",), "b.service", False),
+        (("a.service",), None, False),
+    ],
+)
+def test_confirmation_binds_dependency_set(approved, actual, allowed) -> None:
+    calls: list[tuple[str, ...]] = []
+    confirmation = confirm_snapshot(make_record("parent.service", consists_of=approved), "restart", True)
+
+    def runner(args: Sequence[str], timeout: float, stop: Event | None) -> CommandResult:
+        if "show" in args:
+            return CommandResult(0, _show_block("parent.service", active="active", sub="running", unit_file="enabled", consists_of=actual), "")
+        calls.append(tuple(args))
+        return CommandResult(0, "", "")
+
+    result = execute_service_action(ServiceIdentity("system", "parent.service"), "restart", high_risk_acknowledged=confirmation, runner=runner)
+    assert bool(calls) is allowed
+    if allowed:
+        assert result.outcome == "succeeded"
+    else:
+        assert result.outcome == "failed"
+        assert "stale" in result.summary.casefold() if actual is not None else "ConsistsOf" in result.summary
+
+
+@pytest.mark.parametrize("invalid", ["unit", "scope", "action", "normal", "missing", "boolean"])
+def test_confirmation_rejects_wrong_operation_or_risk(invalid: str) -> None:
+    record = make_record("parent.service", consists_of=("child.service",))
+    confirmation = confirm_snapshot(record, "restart", True)
+    if invalid == "unit":
+        confirmation = replace(confirmation, identity=ServiceIdentity("system", "other.service"))
+    elif invalid == "scope":
+        confirmation = replace(confirmation, identity=ServiceIdentity("user", "parent.service"))
+    elif invalid == "action":
+        confirmation = replace(confirmation, action="stop")
+    elif invalid == "normal":
+        confirmation = replace(confirmation, high_risk=False)
+    calls: list[tuple[str, ...]] = []
+
+    def runner(args: Sequence[str], timeout: float, stop: Event | None) -> CommandResult:
+        if "show" in args:
+            return CommandResult(0, _show_block("parent.service", active="active", sub="running", unit_file="enabled", consists_of="child.service"), "")
+        calls.append(tuple(args))
+        return CommandResult(0, "", "")
+
+    if invalid == "boolean":
+        # A legacy boolean must not bypass the typed snapshot at runtime.
+        result = execute_service_action(record.identity, "restart", high_risk_acknowledged=True, runner=runner)  # type: ignore[arg-type]
+    else:
+        result = execute_service_action(record.identity, "restart", high_risk_acknowledged=None if invalid == "missing" else confirmation, runner=runner)
+    assert result.outcome == "failed" and "stale" in result.summary.casefold()
+    assert calls == []
+    assert result.detail and "child.service" in result.detail
+
+
+def test_normal_confirmation_cannot_authorize_new_high_risk_dependent() -> None:
+    original = make_record("parent.service", consists_of=())
+    approval = confirm_snapshot(original, "restart", False)
+    calls: list[tuple[str, ...]] = []
+
+    def runner(args: Sequence[str], timeout: float, stop: Event | None) -> CommandResult:
+        if "show" in args:
+            return CommandResult(0, _show_block("parent.service", active="active", sub="running", unit_file="enabled", consists_of="new.service"), "")
+        calls.append(tuple(args))
+        return CommandResult(0, "", "")
+
+    result = execute_service_action(original.identity, "restart", high_risk_acknowledged=approval, runner=runner)
+    assert result.outcome == "failed" and "stale" in result.summary.casefold()
+    assert result.detail and "new.service" in result.detail
+    assert calls == []
+
+
+def test_disable_confirmation_ignores_consists_of_and_enforces_required_by_and_part_of() -> None:
+    original = make_record("parent.service", required_by=(), part_of=(), consists_of=("first.service",))
+    approval = confirm_snapshot(original, "disable", False)
+    assert approval.consists_of is None
+    assert approval.required_by == frozenset()
+    assert approval.part_of == frozenset()
+
+    # Changing only ConsistsOf (or omitting it) does not invalidate a disable confirmation.
+    for live_consists in ("first.service second.service", None):
+        calls: list[tuple[str, ...]] = []
+
+        def disable_runner(
+            args: Sequence[str],
+            timeout: float,
+            stop: Event | None,
+            consists: str | None = live_consists,
+            recorded: list[tuple[str, ...]] = calls,
+        ) -> CommandResult:
+            if "show" in args:
+                state = "disabled" if recorded else "enabled"
+                return CommandResult(
+                    0,
+                    _show_block(
+                        "parent.service",
+                        active="active",
+                        sub="running",
+                        unit_file=state,
+                        required_by="",
+                        part_of="",
+                        consists_of=consists,
+                    ),
+                    "",
+                )
+            recorded.append(tuple(args))
+            return CommandResult(0, "", "")
+
+        res = execute_service_action(original.identity, "disable", high_risk_acknowledged=approval, runner=disable_runner)
+        assert res.outcome == "succeeded"
+        assert calls == [("systemctl", "--system", "disable", "--", "parent.service")]
+
+    # Changing RequiredBy or PartOf still invalidates the disable confirmation and prevents mutation.
+    for req_val, part_val, expected_dep in (
+        ("multi-user.target", "", "multi-user.target"),
+        ("", "group.target", "group.target"),
+    ):
+        calls = []
+
+        def changed_dep_runner(
+            args: Sequence[str],
+            timeout: float,
+            stop: Event | None,
+            req: str = req_val,
+            part: str = part_val,
+            recorded: list[tuple[str, ...]] = calls,
+        ) -> CommandResult:
+            if "show" in args:
+                return CommandResult(
+                    0,
+                    _show_block(
+                        "parent.service",
+                        active="active",
+                        sub="running",
+                        unit_file="enabled",
+                        required_by=req,
+                        part_of=part,
+                        consists_of="first.service",
+                    ),
+                    "",
+                )
+            recorded.append(tuple(args))
+            return CommandResult(0, "", "")
+
+        rejected = execute_service_action(original.identity, "disable", high_risk_acknowledged=approval, runner=changed_dep_runner)
+        assert rejected.outcome == "failed" and "stale" in rejected.summary.casefold()
+        assert rejected.detail is not None and expected_dep in rejected.detail
+        assert calls == []
+
+    # ConsistsOf changes continue to invalidate stop and restart confirmations.
+    for action in ("stop", "restart"):
+        calls = []
+        runtime_approval = confirm_snapshot(original, action, True)  # type: ignore[arg-type]
+
+        def runtime_runner(
+            args: Sequence[str],
+            timeout: float,
+            stop: Event | None,
+            recorded: list[tuple[str, ...]] = calls,
+        ) -> CommandResult:
+            if "show" in args:
+                return CommandResult(
+                    0,
+                    _show_block(
+                        "parent.service",
+                        active="active",
+                        sub="running",
+                        unit_file="enabled",
+                        required_by="",
+                        part_of="",
+                        consists_of="first.service second.service",
+                    ),
+                    "",
+                )
+            recorded.append(tuple(args))
+            return CommandResult(0, "", "")
+
+        rejected = execute_service_action(
+            original.identity,
+            action,  # type: ignore[arg-type]
+            high_risk_acknowledged=runtime_approval,
+            runner=runtime_runner,
+        )
+        assert rejected.outcome == "failed" and "stale" in rejected.summary.casefold()
+        assert calls == []
 
 
 def test_execute_service_action_reconciles_state_and_separates_runtime_and_enablement() -> None:
@@ -738,7 +1046,7 @@ def test_execute_service_action_reconciles_state_and_separates_runtime_and_enabl
             return CommandResult(0, _show_block("cups.service", active="active", sub="running", unit_file="enabled"), "")
         return CommandResult(0, "", "")
 
-    res = execute_service_action(ServiceIdentity("system", "cups.service"), "stop", runner=stop_reactivated)
+    res = execute_service_action(ServiceIdentity("system", "cups.service"), "stop", high_risk_acknowledged=confirm_snapshot(make_record("cups.service"), "stop", False), runner=stop_reactivated)
     assert res.outcome == "warning" and "reactivated" in res.summary.casefold()
 
 
@@ -765,7 +1073,7 @@ def test_execute_service_action_classifies_auth_timeout_interrupted_failure_and_
             return CommandResult(0, _show_block("cups.service", active="active", sub="running", unit_file="enabled"), "")
         return CommandResult(1, "", "Failed to stop cups.service: Access denied")
 
-    res = execute_service_action(ServiceIdentity("system", "cups.service"), "stop", runner=auth_denied)
+    res = execute_service_action(ServiceIdentity("system", "cups.service"), "stop", high_risk_acknowledged=confirm_snapshot(make_record("cups.service"), "stop", False), runner=auth_denied)
     assert res.outcome == "auth_cancelled"
 
     saw_restart = False
@@ -779,7 +1087,7 @@ def test_execute_service_action_classifies_auth_timeout_interrupted_failure_and_
         saw_restart = True
         return CommandResult(-1, "", "", timed_out=True)
 
-    res = execute_service_action(ServiceIdentity("system", "slow.service"), "restart", runner=timed_out)
+    res = execute_service_action(ServiceIdentity("system", "slow.service"), "restart", high_risk_acknowledged=confirm_snapshot(make_record("slow.service"), "restart", False), runner=timed_out)
     assert res.outcome == "timed_out"
     assert "background" in res.summary.casefold()
     assert "Activating" in res.summary
@@ -790,7 +1098,7 @@ def test_execute_service_action_classifies_auth_timeout_interrupted_failure_and_
             return CommandResult(0, _show_block("slow.service", active="active", sub="running", unit_file="enabled"), "")
         return CommandResult(-1, "", "", cancelled=True)
 
-    res = execute_service_action(ServiceIdentity("system", "slow.service"), "stop", runner=interrupted_mid_flight)
+    res = execute_service_action(ServiceIdentity("system", "slow.service"), "stop", high_risk_acknowledged=confirm_snapshot(make_record("slow.service"), "stop", False), runner=interrupted_mid_flight)
     assert res.outcome == "interrupted"
     assert "unknown" in res.summary.casefold()
 
@@ -799,5 +1107,5 @@ def test_execute_service_action_classifies_auth_timeout_interrupted_failure_and_
             return CommandResult(0, _show_block("custom.service", active="inactive", sub="dead", unit_file="enabled"), "")
         return CommandResult(1, "", "Failed to disable custom.service: Unit file is read-only")
 
-    res = execute_service_action(ServiceIdentity("system", "custom.service"), "disable", runner=cmd_failed)
+    res = execute_service_action(ServiceIdentity("system", "custom.service"), "disable", high_risk_acknowledged=confirm_snapshot(make_record("custom.service"), "disable", False), runner=cmd_failed)
     assert res.outcome == "failed" and res.detail is not None and "read-only" in res.detail.casefold()

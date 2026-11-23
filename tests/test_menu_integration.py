@@ -1,7 +1,9 @@
+import errno
 from pathlib import Path
 import os
 import shutil
 import subprocess
+import sys
 import time
 
 import pytest
@@ -114,6 +116,143 @@ def test_existing_manual_launcher_is_preserved(image_environment) -> None:
         menu_integration.install_appimage_menu()
     assert existing.read_text() == "[Desktop Entry]\nName=TaskPup\nExec=/other\n"
     assert not (applications / "taskpup-appimage.desktop").exists()
+
+
+def test_symlink_to_existing_manual_launcher_is_preserved(image_environment) -> None:
+    _, _, data = image_environment
+    applications = data / "applications"
+    applications.mkdir(parents=True)
+    target = data.parent / "manual-taskpup.desktop"
+    target.write_text("[Desktop Entry]\nName=TaskPup\nExec=/other\n", encoding="utf-8")
+    link = applications / "linked.desktop"
+    link.symlink_to(target)
+
+    with pytest.raises(menu_integration.MenuIntegrationError, match="existing TaskPup launcher"):
+        menu_integration.install_appimage_menu()
+
+    assert link.is_symlink()
+    assert target.read_text(encoding="utf-8") == "[Desktop Entry]\nName=TaskPup\nExec=/other\n"
+    assert not (applications / "taskpup-appimage.desktop").exists()
+
+
+def test_oversized_launcher_refuses_installation(image_environment) -> None:
+    _, _, data = image_environment
+    applications = data / "applications"
+    applications.mkdir(parents=True)
+    existing = applications / "manual.desktop"
+    content = "[Desktop Entry]\nName=TaskPup\nExec=/other\n" + "# note\n" * 150000
+    existing.write_text(content, encoding="utf-8")
+    with pytest.raises(menu_integration.MenuIntegrationError, match="oversized desktop entry"):
+        menu_integration.install_appimage_menu()
+    assert existing.read_text(encoding="utf-8") == content
+    assert not (applications / "taskpup-appimage.desktop").exists()
+    assert not (data / "icons/hicolor/256x256/apps/taskpup-appimage.png").exists()
+
+
+def test_unreadable_candidate_entry_aborts_installation_without_creating_files(
+    image_environment, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _, data = image_environment
+    applications = data / "applications"
+    applications.mkdir(parents=True)
+    unreadable = applications / "manual.desktop"
+    unreadable.write_text("[Desktop Entry]\nName=TaskPup\nExec=/other\n", encoding="utf-8")
+    real_open = os.open
+
+    def deny_open(path, flags, *args, **kwargs):
+        if Path(path) == unreadable:
+            raise PermissionError(errno.EACCES, "Permission denied", str(unreadable))
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", deny_open)
+    with pytest.raises(menu_integration.MenuIntegrationError) as raised:
+        menu_integration.install_appimage_menu()
+
+    message = str(raised.value)
+    assert str(unreadable) in message
+    assert "Permission denied" in message
+    assert "permissions" in message.casefold()
+    assert not (applications / "taskpup-appimage.desktop").exists()
+    assert not (data / "icons/hicolor/256x256/apps/taskpup-appimage.png").exists()
+
+
+def test_read_permission_error_on_candidate_entry_aborts_and_closes_fd(
+    image_environment, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _, data = image_environment
+    applications = data / "applications"
+    applications.mkdir(parents=True)
+    unreadable = applications / "manual.desktop"
+    unreadable.write_text("[Desktop Entry]\nName=TaskPup\nExec=/other\n", encoding="utf-8")
+    real_open = os.open
+    real_read = os.read
+    real_close = os.close
+    tracked_fds: set[int] = set()
+    closed_fds: set[int] = set()
+
+    def tracking_open(path, flags, *args, **kwargs):
+        fd = real_open(path, flags, *args, **kwargs)
+        if Path(path) == unreadable:
+            tracked_fds.add(fd)
+        return fd
+
+    def failing_read(fd: int, length: int) -> bytes:
+        if fd in tracked_fds:
+            raise PermissionError(errno.EACCES, "Permission denied", str(unreadable))
+        return real_read(fd, length)
+
+    def tracking_close(fd: int) -> None:
+        if fd in tracked_fds:
+            closed_fds.add(fd)
+        real_close(fd)
+
+    monkeypatch.setattr(os, "open", tracking_open)
+    monkeypatch.setattr(os, "read", failing_read)
+    monkeypatch.setattr(os, "close", tracking_close)
+
+    with pytest.raises(menu_integration.MenuIntegrationError) as raised:
+        menu_integration.install_appimage_menu()
+
+    assert str(unreadable) in str(raised.value)
+    assert tracked_fds and tracked_fds == closed_fds
+    assert not (applications / "taskpup-appimage.desktop").exists()
+    assert not (data / "icons/hicolor/256x256/apps/taskpup-appimage.png").exists()
+
+
+def test_conflict_scan_skips_fifo_and_malformed_entries_without_blocking(image_environment) -> None:
+    image, icon, data = image_environment
+    applications = data / "applications"
+    applications.mkdir(parents=True)
+    os.mkfifo(applications / "special.desktop")
+    (applications / "malformed.desktop").write_bytes(b"not a desktop entry\n\xff")
+
+    environment = os.environ.copy()
+    source = Path(__file__).resolve().parents[1] / "src"
+    environment["PYTHONPATH"] = os.pathsep.join(
+        part for part in (str(source), environment.get("PYTHONPATH", "")) if part
+    )
+    environment["APPIMAGE"] = str(image)
+    environment["TASKPUP_APPIMAGE_ICON"] = str(icon)
+    environment["XDG_DATA_HOME"] = str(data)
+    environment["XDG_DATA_DIRS"] = str(data.parent / "system")
+    environment.pop("APPDIR", None)
+    environment.pop("DESKTOPINTEGRATION", None)
+    script = (
+        "import psutil; psutil.process_iter = lambda *_: []; "
+        "from taskpup.menu_integration import install_appimage_menu; "
+        "print(install_appimage_menu())"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=3,
+        env=environment,
+    )
+
+    assert Path(result.stdout.strip()) == applications / "taskpup-appimage.desktop"
+    assert (data / "icons/hicolor/256x256/apps/taskpup-appimage.png").read_bytes() == icon.read_bytes()
 
 
 def test_system_launcher_conflict_and_own_appdir(image_environment, monkeypatch: pytest.MonkeyPatch) -> None:

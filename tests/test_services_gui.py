@@ -1,4 +1,4 @@
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
 from threading import Event, get_ident
@@ -9,10 +9,18 @@ from PySide6.QtCore import QEventLoop, QObject, QSettings, Qt, QTimer
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QCheckBox, QDialog, QDialogButtonBox, QLabel, QPushButton
 
-from taskpup import dialogs
+from taskpup import dialogs, service_controls
 from taskpup.refresh import RefreshController
-from taskpup.service_controls import ServiceAction, ServiceOperationResult, assess_service_risk
-from taskpup.services import ScopeStatus, ServiceIdentity, ServiceRecord, ServicesSnapshot
+from taskpup.service_controls import (
+    RiskAssessment,
+    ServiceAction,
+    ServiceConfirmation,
+    ServiceOperationResult,
+    assess_service_risk,
+    confirm_snapshot,
+    execute_service_action,
+)
+from taskpup.services import CommandResult, ScopeStatus, ServiceIdentity, ServiceRecord, ServicesSnapshot
 from taskpup.settings import Settings
 from taskpup.window import MainWindow
 
@@ -357,7 +365,7 @@ def test_service_control_buttons_confirmations_stale_guard_and_feedback(
     assert not page.stop_button.isEnabled() and not page.restart_button.isEnabled() and not page.disable_button.isEnabled()
 
     # User cancelling confirmation emits no action.
-    requested: list[tuple[ServiceIdentity, str, bool]] = []
+    requested: list[tuple[ServiceIdentity, str, ServiceConfirmation]] = []
     page.action_requested.connect(lambda ident, act, ack: requested.append((ident, act, ack)))
     monkeypatch.setattr(dialogs, "confirm_service_action", lambda *args: False)
     page.start_button.click()
@@ -366,7 +374,7 @@ def test_service_control_buttons_confirmations_stale_guard_and_feedback(
     # Confirmed action emits immutable (identity, action, high_risk_acknowledged).
     monkeypatch.setattr(dialogs, "confirm_service_action", lambda *args: True)
     page.enable_button.click()
-    assert requested == [(brltty.identity, "enable", False)]
+    assert requested == [(brltty.identity, "enable", confirm_snapshot(brltty, "enable", False))]
 
     # While operation is in progress, all action buttons disable and changing selection does NOT redirect or unlock.
     page.set_operation_started(brltty.identity, "enable")
@@ -395,6 +403,347 @@ def test_service_control_buttons_confirmations_stale_guard_and_feedback(
     page.stop_button.click()
     assert requested == []
     assert "no longer present" in page.feedback_label.text()
+
+
+def test_dependency_change_during_confirmation_requires_another_decision(window: MainWindow, monkeypatch: pytest.MonkeyPatch) -> None:
+    page = window.services
+    original = replace(make_service("cups.service"), required_by=(), part_of=(), consists_of=("first.service",))
+    updated = replace(original, consists_of=("first.service", "second.service"))
+    window.apply_services(sample_snapshot(original))
+    page.view.setCurrentIndex(page.model.index_for(original.identity))
+    requested: list[ServiceConfirmation] = []
+    page.action_requested.connect(lambda _identity, _action, approval: requested.append(approval))
+    shown: list[tuple[str, ...] | None] = []
+
+    def confirm(_parent, record, _action, _risk):
+        shown.append(record.consists_of)
+        if len(shown) == 1:
+            window.apply_services(sample_snapshot(updated))
+        return True
+
+    monkeypatch.setattr(dialogs, "confirm_service_action", confirm)
+    page.trigger_action("restart")
+    assert requested == []
+    assert "confirm again" in page.feedback_label.text()
+    page.trigger_action("restart")
+    assert shown == [("first.service",), ("first.service", "second.service")]
+    assert requested == [confirm_snapshot(updated, "restart", True)]
+
+
+def _service_show_output(
+    unit: str,
+    *,
+    active: str = "inactive",
+    sub: str = "dead",
+    unit_file: str = "enabled",
+    required_by: str | None = "",
+    part_of: str | None = "",
+    consists_of: str | None = "",
+) -> str:
+    lines = [
+        f"Id={unit}",
+        f"Description={unit} description",
+        "LoadState=loaded",
+        f"ActiveState={active}",
+        f"SubState={sub}",
+        f"UnitFileState={unit_file}",
+        "UnitFilePreset=enabled",
+        f"FragmentPath=/usr/lib/systemd/system/{unit}",
+        "MainPID=0",
+        "Type=simple",
+        "User=",
+        "Transient=no",
+        "Result=success",
+        "ActiveEnterTimestamp=",
+        "StatusText=",
+        "TriggeredBy=",
+        "CanStart=yes",
+        "CanStop=yes",
+        "RefuseManualStart=no",
+        "RefuseManualStop=no",
+    ]
+    if required_by is not None:
+        lines.append(f"RequiredBy={required_by}")
+    if part_of is not None:
+        lines.append(f"PartOf={part_of}")
+    if consists_of is not None:
+        lines.append(f"ConsistsOf={consists_of}")
+    return "\n".join(lines) + "\n"
+
+
+def test_installed_only_service_disable_fetches_authoritative_metadata_and_executes(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page = window.services
+    window.navigation.setCurrentIndex(2)
+    real_query = service_controls.query_service_state
+    installed_only = make_service(
+        "installed-only.service",
+        scope="system",
+        loaded=False,
+        load_state=None,
+        active_state=None,
+        sub_state=None,
+        unit_file_state="enabled",
+        main_pid=None,
+    )
+    window.apply_services(sample_snapshot(installed_only))
+    page.view.setCurrentIndex(page.model.index_for(installed_only.identity))
+    assert page.disable_button.isEnabled()
+
+    requested: list[tuple[ServiceIdentity, str, ServiceConfirmation]] = []
+    page.action_requested.connect(lambda ident, act, conf: requested.append((ident, act, conf)))
+    dialog_calls: list[tuple[ServiceRecord, ServiceAction, RiskAssessment]] = []
+
+    def accept_dialog(_parent, rec: ServiceRecord, act: ServiceAction, risk: RiskAssessment) -> bool:
+        dialog_calls.append((rec, act, risk))
+        return True
+
+    monkeypatch.setattr(dialogs, "confirm_service_action", accept_dialog)
+    queried: list[ServiceIdentity] = []
+    gui_show_payload = _service_show_output("installed-only.service", unit_file="enabled")
+
+    def gui_query(identity: ServiceIdentity, **kwargs):
+        if kwargs:
+            return real_query(identity, **kwargs)
+        queried.append(identity)
+        return real_query(identity, runner=lambda _args, _timeout, _stop: CommandResult(0, gui_show_payload, ""))
+
+    monkeypatch.setattr(service_controls, "query_service_state", gui_query)
+
+    # 1. Installed-only enabled unit with empty dependencies disables successfully end-to-end.
+    page.disable_button.click()
+    assert queried == [installed_only.identity]
+    assert len(dialog_calls) == 1
+    assert dialog_calls[0][0].identity == installed_only.identity
+    assert dialog_calls[0][0].loaded is True
+    assert dialog_calls[0][0].required_by == ()
+    assert dialog_calls[0][0].part_of == ()
+    assert dialog_calls[0][1] == "disable"
+    assert dialog_calls[0][2].level == "normal"
+    expected_confirmation = confirm_snapshot(dialog_calls[0][0], "disable", False)
+    assert expected_confirmation.identity == installed_only.identity
+    assert expected_confirmation.action == "disable"
+    assert expected_confirmation.required_by == frozenset()
+    assert expected_confirmation.part_of == frozenset()
+    assert expected_confirmation.consists_of is None
+    assert requested == [(installed_only.identity, "disable", expected_confirmation)]
+
+    mutating_calls: list[tuple[str, ...]] = []
+
+    def disable_ok_runner(args: Sequence[str], timeout: float, stop: Event | None) -> CommandResult:
+        if "show" in args:
+            state = "disabled" if mutating_calls else "enabled"
+            return CommandResult(0, _service_show_output("installed-only.service", unit_file=state), "")
+        mutating_calls.append(tuple(args))
+        return CommandResult(0, "", "")
+
+    ok_result = execute_service_action(
+        requested[0][0],
+        "disable",
+        high_risk_acknowledged=requested[0][2],
+        runner=disable_ok_runner,
+    )
+    assert ok_result.outcome == "succeeded"
+    assert mutating_calls == [("systemctl", "--system", "disable", "--", "installed-only.service")]
+
+    # 2. Execution-time dependency changes still reject mutation with zero mutating commands.
+    changed_calls: list[tuple[str, ...]] = []
+
+    def changed_dep_runner(args: Sequence[str], timeout: float, stop: Event | None) -> CommandResult:
+        if "show" in args:
+            return CommandResult(
+                0,
+                _service_show_output("installed-only.service", unit_file="enabled", required_by="multi-user.target"),
+                "",
+            )
+        changed_calls.append(tuple(args))
+        return CommandResult(0, "", "")
+
+    stale_result = execute_service_action(
+        requested[0][0],
+        "disable",
+        high_risk_acknowledged=requested[0][2],
+        runner=changed_dep_runner,
+    )
+    assert stale_result.outcome == "failed" and "stale" in stale_result.summary.casefold()
+    assert changed_calls == []
+
+    # 3. Dependency changes surfaced during the confirmation dialog also block emission.
+    requested.clear()
+    loaded_with_dep = replace(dialog_calls[0][0], required_by=("app.service",))
+
+    def load_dep_during_confirm(_parent, _rec: ServiceRecord, _act: ServiceAction, _risk: RiskAssessment) -> bool:
+        window.apply_services(sample_snapshot(loaded_with_dep))
+        return True
+
+    monkeypatch.setattr(dialogs, "confirm_service_action", load_dep_during_confirm)
+    page.disable_button.click()
+    assert requested == []
+    assert "confirm again" in page.feedback_label.text()
+
+    # 4. User-scope installed-only unit with authoritative dependents escalates risk and binds scope + deps.
+    user_installed = make_service(
+        "user-installed.service",
+        scope="user",
+        loaded=False,
+        load_state=None,
+        active_state=None,
+        sub_state=None,
+        unit_file_state="enabled",
+        main_pid=None,
+    )
+    window.apply_services(sample_snapshot(user_installed))
+    page.view.setCurrentIndex(page.model.index_for(user_installed.identity))
+    requested.clear()
+    dialog_calls.clear()
+    gui_show_payload = _service_show_output("user-installed.service", unit_file="enabled", required_by="default.target")
+    monkeypatch.setattr(dialogs, "confirm_service_action", accept_dialog)
+    page.disable_button.click()
+    assert len(dialog_calls) == 1
+    assert dialog_calls[0][0].identity == ServiceIdentity("user", "user-installed.service")
+    assert dialog_calls[0][2].level == "high"
+    assert len(requested) == 1
+    assert requested[0][0] == ServiceIdentity("user", "user-installed.service")
+    assert requested[0][2].high_risk is True
+    assert requested[0][2].required_by == frozenset({"default.target"})
+    assert requested[0][2].part_of == frozenset()
+
+    # 5. Missing or incomplete authoritative metadata rejects before showing the confirmation dialog.
+    window.apply_services(sample_snapshot(installed_only))
+    page.view.setCurrentIndex(page.model.index_for(installed_only.identity))
+    for missing_payload in (None, _service_show_output("installed-only.service", unit_file="enabled", required_by=None)):
+        requested.clear()
+        dialog_calls.clear()
+        monkeypatch.setattr(dialogs, "confirm_service_action", accept_dialog)
+
+        def missing_query(identity: ServiceIdentity, payload: str | None = missing_payload, **kwargs):
+            if kwargs:
+                return real_query(identity, **kwargs)
+            if payload is None:
+                return None
+            return real_query(identity, runner=lambda _args, _timeout, _stop: CommandResult(0, payload, ""))
+
+        monkeypatch.setattr(service_controls, "query_service_state", missing_query)
+        page.disable_button.click()
+        assert dialog_calls == []
+        assert requested == []
+        assert page.feedback.isVisible()
+        assert "refused to disable" in page.feedback_label.text().casefold()
+
+    # 6. Existing loaded-unit disable does not re-query before confirmation and remains functional.
+    loaded_svc = replace(
+        make_service("cups.service", scope="system", loaded=True, unit_file_state="enabled"),
+        required_by=(),
+        part_of=(),
+        consists_of=(),
+    )
+    window.apply_services(sample_snapshot(loaded_svc))
+    page.view.setCurrentIndex(page.model.index_for(loaded_svc.identity))
+    requested.clear()
+    queried.clear()
+    monkeypatch.setattr(
+        service_controls,
+        "query_service_state",
+        lambda identity, **kwargs: real_query(identity, **kwargs) if kwargs else (queried.append(identity) or None),
+    )
+    monkeypatch.setattr(dialogs, "confirm_service_action", accept_dialog)
+    page.disable_button.click()
+    assert queried == []
+    assert requested == [(loaded_svc.identity, "disable", confirm_snapshot(loaded_svc, "disable", False))]
+
+
+def test_disable_ignores_consists_of_change_but_rejects_relevant_dependency_changes(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page = window.services
+    original = replace(make_service("cups.service"), required_by=(), part_of=(), consists_of=("first.service",))
+    consists_changed = replace(original, consists_of=("first.service", "second.service"))
+    requested: list[tuple[ServiceIdentity, str, ServiceConfirmation]] = []
+    page.action_requested.connect(lambda ident, act, conf: requested.append((ident, act, conf)))
+
+    # 1. Changing only ConsistsOf during a disable confirmation does not block disable in GUI or backend.
+    window.apply_services(sample_snapshot(original))
+    page.view.setCurrentIndex(page.model.index_for(original.identity))
+
+    def change_consists_during_confirm(*_args) -> bool:
+        window.apply_services(sample_snapshot(consists_changed))
+        return True
+
+    monkeypatch.setattr(dialogs, "confirm_service_action", change_consists_during_confirm)
+    page.trigger_action("disable")
+    expected_disable = confirm_snapshot(original, "disable", False)
+    assert expected_disable.consists_of is None
+    assert requested == [(original.identity, "disable", expected_disable)]
+
+    mutating_calls: list[tuple[str, ...]] = []
+
+    def backend_disable_runner(args: Sequence[str], timeout: float, stop: Event | None) -> CommandResult:
+        if "show" in args:
+            state = "disabled" if mutating_calls else "enabled"
+            return CommandResult(
+                0,
+                _service_show_output(
+                    "cups.service",
+                    active="active",
+                    sub="running",
+                    unit_file=state,
+                    required_by="",
+                    part_of="",
+                    consists_of="first.service second.service",
+                ),
+                "",
+            )
+        mutating_calls.append(tuple(args))
+        return CommandResult(0, "", "")
+
+    res = execute_service_action(
+        requested[0][0],
+        "disable",
+        high_risk_acknowledged=requested[0][2],
+        runner=backend_disable_runner,
+    )
+    assert res.outcome == "succeeded"
+    assert mutating_calls == [("systemctl", "--system", "disable", "--", "cups.service")]
+
+    # 2. The exact same ConsistsOf change during restart requires fresh confirmation.
+    requested.clear()
+    window.apply_services(sample_snapshot(original))
+    page.view.setCurrentIndex(page.model.index_for(original.identity))
+    page.trigger_action("restart")
+    assert requested == []
+    assert "confirm again" in page.feedback_label.text()
+
+    # 3. Relevant dependency changes (RequiredBy or PartOf) during disable still reject confirmation.
+    for updated in (
+        replace(original, required_by=("printing.target",)),
+        replace(original, part_of=("printing.target",)),
+    ):
+        requested.clear()
+        window.apply_services(sample_snapshot(original))
+        page.view.setCurrentIndex(page.model.index_for(original.identity))
+
+        def change_relevant_during_confirm(*_args, target: ServiceRecord = updated) -> bool:
+            window.apply_services(sample_snapshot(target))
+            return True
+
+        monkeypatch.setattr(dialogs, "confirm_service_action", change_relevant_during_confirm)
+        page.trigger_action("disable")
+        assert requested == []
+        assert "confirm again" in page.feedback_label.text()
+
+
+def test_stale_backend_confirmation_displays_new_risk(window: MainWindow) -> None:
+    page = window.services
+    record = replace(make_service("cups.service"), consists_of=("new-child.service",))
+    window.apply_services(sample_snapshot(record))
+    result = ServiceOperationResult(
+        record.identity, "restart", "failed", "Confirmation is stale; refresh and confirm again.",
+        detail="Consists of dependent units: new-child.service.", verified_record=record,
+    )
+    page.apply_operation_result(result)
+    assert "confirm again" in page.feedback_label.text()
+    assert "new-child.service" in page.feedback_label.text()
 
 
 def test_high_risk_confirmation_dialog_requires_impact_checkbox(window: MainWindow, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -429,7 +778,7 @@ def test_service_action_worker_prevents_duplicates_discards_stale_refresh_and_st
     stale_refresh_started = Event()
     stale_refresh_cancelled = Event()
     refreshes: list[int] = []
-    actions_run: list[tuple[ServiceIdentity, ServiceAction, bool, int]] = []
+    actions_run: list[tuple[ServiceIdentity, ServiceAction, ServiceConfirmation | None, int]] = []
     finished: list[tuple[int, ServiceOperationResult]] = []
     snapshots: list[ServicesSnapshot] = []
 
@@ -447,7 +796,7 @@ def test_service_action_worker_prevents_duplicates_discards_stale_refresh_and_st
         identity: ServiceIdentity,
         action: ServiceAction,
         stop: Event,
-        high_risk_acknowledged: bool,
+        high_risk_acknowledged: ServiceConfirmation | None,
     ) -> ServiceOperationResult:
         actions_run.append((identity, action, high_risk_acknowledged, get_ident()))
         if len(actions_run) == 1:
@@ -467,7 +816,8 @@ def test_service_action_worker_prevents_duplicates_discards_stale_refresh_and_st
         wait_for(stale_refresh_started.is_set)
 
         target = ServiceIdentity("system", "cups.service")
-        assert controller.request_service_action(target, "restart", True) is True
+        approval = confirm_snapshot(make_service("cups.service"), "restart", True)
+        assert controller.request_service_action(target, "restart", approval) is True
         wait_for(action_started.is_set)
         wait_for(stale_refresh_cancelled.is_set)
 
@@ -476,7 +826,7 @@ def test_service_action_worker_prevents_duplicates_discards_stale_refresh_and_st
 
         action_release.set()
         wait_for(lambda: len(finished) == 1 and len(snapshots) == 1 and controller.service_action_future is None)
-        assert actions_run[0][:3] == (target, "restart", True)
+        assert actions_run[0][:3] == (target, "restart", approval)
         assert actions_run[0][3] != gui_thread
         assert finished[0][0] == gui_thread
         assert finished[0][1].outcome == "succeeded"
@@ -530,7 +880,7 @@ def test_p2_close_behavior_idle_keep_open_exit_anyway_and_completion_during_prom
     finished_results: list[ServiceOperationResult] = []
     target = ServiceIdentity("system", "cups.service")
 
-    def slow_executor(ident: ServiceIdentity, act: ServiceAction, stop: Event, ack: bool) -> ServiceOperationResult:
+    def slow_executor(ident: ServiceIdentity, act: ServiceAction, stop: Event, ack: ServiceConfirmation | None) -> ServiceOperationResult:
         started.set()
         if release.wait(3.0):
             return ServiceOperationResult(ident, act, "succeeded", f"Restarted {ident.unit} (Running).")
@@ -539,7 +889,7 @@ def test_p2_close_behavior_idle_keep_open_exit_anyway_and_completion_during_prom
     keep_win = make_window(slow_executor, loader=lambda _s: sample_snapshot(make_service("cups.service")))
     keep_win.refresh.service_action_finished.connect(finished_results.append)
     try:
-        assert keep_win.refresh.request_service_action(target, "restart", False) is True
+        assert keep_win.refresh.request_service_action(target, "restart", None) is True
         wait_for(started.is_set)
 
         dialog_text: dict[str, str] = {}
@@ -583,7 +933,7 @@ def test_p2_close_behavior_idle_keep_open_exit_anyway_and_completion_during_prom
     exit_stop_seen = Event()
     exit_finished: list[ServiceOperationResult] = []
 
-    def blocking_executor(ident: ServiceIdentity, act: ServiceAction, stop: Event, ack: bool) -> ServiceOperationResult:
+    def blocking_executor(ident: ServiceIdentity, act: ServiceAction, stop: Event, ack: ServiceConfirmation | None) -> ServiceOperationResult:
         exit_started.set()
         stop.wait(3.0)
         if stop.is_set():
@@ -617,7 +967,7 @@ def test_p2_close_behavior_idle_keep_open_exit_anyway_and_completion_during_prom
     comp_release = Event()
     comp_finished: list[ServiceOperationResult] = []
 
-    def completing_executor(ident: ServiceIdentity, act: ServiceAction, stop: Event, ack: bool) -> ServiceOperationResult:
+    def completing_executor(ident: ServiceIdentity, act: ServiceAction, stop: Event, ack: ServiceConfirmation | None) -> ServiceOperationResult:
         comp_started.set()
         comp_release.wait(3.0)
         return ServiceOperationResult(ident, act, "succeeded", f"Started {ident.unit} (Running).")

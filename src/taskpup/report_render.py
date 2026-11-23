@@ -5343,18 +5343,15 @@ def _atomic_write(destination: Path, payload: bytes, *, overwrite: bool) -> None
 
         try:
             os.fchmod(file_fd, 0o600)
-            with os.fdopen(file_fd, "wb", closefd=True) as output:
+            # Keep ownership of the raw descriptor even if fdopen fails partway
+            # through constructing its stream.  The wrapper never closes it.
+            with os.fdopen(file_fd, "wb", closefd=False) as output:
                 output.write(payload)
                 output.flush()
                 os.fsync(output.fileno())
-        except BaseException:
-            # fdopen owns file_fd after construction; if construction itself failed,
-            # closing an already-closed descriptor is harmlessly guarded below.
-            try:
-                os.close(file_fd)
-            except OSError:
-                pass
-            raise
+        finally:
+            # closefd=False keeps the descriptor owned here through every path.
+            os.close(file_fd)
 
         try:
             existing = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
@@ -5383,12 +5380,14 @@ def _atomic_write(destination: Path, payload: bytes, *, overwrite: bool) -> None
             os.unlink(temporary_name, dir_fd=directory_fd)
             temporary_name = None
     finally:
-        if temporary_name is not None:
-            try:
-                os.unlink(temporary_name, dir_fd=directory_fd)
-            except FileNotFoundError:
-                pass
-        os.close(directory_fd)
+        try:
+            if temporary_name is not None:
+                try:
+                    os.unlink(temporary_name, dir_fd=directory_fd)
+                except FileNotFoundError:
+                    pass
+        finally:
+            os.close(directory_fd)
 
 
 def write_report(

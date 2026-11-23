@@ -10,7 +10,7 @@ from PySide6.QtCore import QObject, QTimer, Signal, Slot
 from taskpup.metrics import SystemSample, SystemSampler
 from taskpup.platform import desktop_icons
 from taskpup.processes import Resources, Sampler, Snapshot
-from taskpup.service_controls import ServiceAction, ServiceOperationResult, execute_service_action
+from taskpup.service_controls import ServiceAction, ServiceConfirmation, ServiceOperationResult, execute_service_action
 from taskpup.services import ServiceIdentity, ServicesSnapshot, discover_services
 
 
@@ -35,7 +35,7 @@ def _default_service_executor(
     identity: ServiceIdentity,
     action: ServiceAction,
     stop: Event,
-    high_risk_acknowledged: bool,
+    high_risk_acknowledged: ServiceConfirmation | None,
 ) -> ServiceOperationResult:
     return execute_service_action(
         identity,
@@ -60,7 +60,7 @@ class RefreshController(QObject):
         self, parent: QObject, sample: Callable[[Event], Snapshot] | None = None,
         system: SystemSampler | None = None,
         services: Callable[[Event], ServicesSnapshot] | None = None,
-        service_executor: Callable[[ServiceIdentity, ServiceAction, Event, bool], ServiceOperationResult] | None = None,
+        service_executor: Callable[[ServiceIdentity, ServiceAction, Event, ServiceConfirmation | None], ServiceOperationResult] | None = None,
     ) -> None:
         super().__init__(parent)
         self.sample = sample
@@ -222,12 +222,12 @@ class RefreshController(QObject):
             return None
         return self.service_action_target
 
-    @Slot(object, str, bool)
+    @Slot(object, str, object)
     def request_service_action(
         self,
         identity: ServiceIdentity,
         action: ServiceAction,
-        high_risk_acknowledged: bool = False,
+        high_risk_acknowledged: ServiceConfirmation | None = None,
     ) -> bool:
         if self.stop_requested.is_set() or self.service_action_future is not None:
             return False
@@ -253,7 +253,7 @@ class RefreshController(QObject):
         identity: ServiceIdentity,
         action: ServiceAction,
         action_stop: Event,
-        high_risk_acknowledged: bool,
+        high_risk_acknowledged: ServiceConfirmation | None,
     ) -> ServiceOperationResult:
         if self.stop_requested.is_set() or action_stop.is_set():
             return ServiceOperationResult(

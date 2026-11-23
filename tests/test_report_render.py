@@ -1,6 +1,7 @@
 import copy
 from html.parser import HTMLParser
 import json
+import os
 import re
 import stat
 import zipfile
@@ -104,6 +105,64 @@ def test_privacy_modes_are_consistent_across_all_exports(tmp_path, protected: bo
             assert "/dev/nvme2n1" in text and "/media/private-name" in text
     if protected:
         assert "Device 1, Partition 2" in texts[0] and "Synthetic SSD" in texts[0]
+
+
+@pytest.mark.parametrize("format_name", ["html", "md", "json", "jsonl", "zip"])
+@pytest.mark.parametrize("protected", [True, False])
+def test_mount_user_and_broadcast_privacy_across_every_export(
+    tmp_path, format_name: str, protected: bool,
+) -> None:
+    privacy = report_collect._Privacy(protected)
+    raw = {
+        "fstab": report_collect._parse_fstab(
+            "/dev/sda1 /mnt/share cifs user=synthetic-remote-account,user,ro 0 0", privacy,
+        ),
+        "network": {
+            "addresses": [
+                {"family": "MAC", "address": "02:de:ad:be:ef:01", "broadcast": "02:de:ad:be:ef:02"},
+                {"family": "IPv4", "address": "192.0.2.4", "broadcast": "198.51.100.255"},
+                {"family": "IPv6", "address": "2001:db8::4", "broadcast": "2001:db8::ffff"},
+            ],
+        },
+    }
+    sanitized = report_collect._sanitize(raw, privacy)
+    mount_options = sanitized["fstab"][0]["options"]
+    assert {"name": "user"} in mount_options
+    if protected:
+        assert any(
+            option["name"] == "user" and option.get("value", "").startswith("<user-")
+            for option in mount_options
+        )
+    else:
+        assert {"name": "user", "value": "synthetic-remote-account"} in mount_options
+    data = snapshot()
+    data["privacy"] = protected
+    data["sections"] = {"storage and network": sanitized}
+    suffix = {"html": "html", "md": "md", "json": "json", "jsonl": "jsonl", "zip": "zip"}[format_name]
+    destination = tmp_path / f"diagnostic.{suffix}"
+
+    write_report(data, destination, format_name)
+
+    if format_name == "zip":
+        with zipfile.ZipFile(destination) as archive:
+            assert archive.testzip() is None
+            outputs = [archive.read(name).decode("utf-8") for name in archive.namelist()]
+            assert set(archive.namelist()) == {"report.md", "report.json", "report.jsonl", "report.html"}
+    else:
+        outputs = [destination.read_text(encoding="utf-8")]
+    combined = "\n".join(outputs)
+    if protected:
+        for private_value in (
+            "synthetic-remote-account", "02:de:ad:be:ef:01", "02:de:ad:be:ef:02",
+            "198.51.100.255", "2001:db8::ffff",
+        ):
+            assert private_value not in combined
+    else:
+        for full_value in (
+            "synthetic-remote-account", "02:de:ad:be:ef:01", "02:de:ad:be:ef:02",
+            "198.51.100.255", "2001:db8::ffff",
+        ):
+            assert full_value in combined
 
 
 def test_byte_formatting_uses_binary_units_and_handles_boundaries() -> None:
@@ -247,6 +306,145 @@ def test_failed_temporary_write_is_cleaned_up(tmp_path, monkeypatch) -> None:
     with pytest.raises(OSError, match="simulated disk error"):
         write_report(snapshot(), destination, "md")
 
+    assert not destination.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_cleanup_failure_still_closes_directory_descriptor(tmp_path, monkeypatch) -> None:
+    real_open, real_close = os.open, os.close
+    directory_fds: list[int] = []
+    closed: list[int] = []
+
+    def track_open(path, flags, *args, **kwargs):
+        fd = real_open(path, flags, *args, **kwargs)
+        if path == tmp_path:
+            directory_fds.append(fd)
+        return fd
+
+    def track_close(fd):
+        if fd in directory_fds:
+            closed.append(fd)
+        real_close(fd)
+
+    def fail(*args, **kwargs):
+        raise OSError("simulated failure")
+
+    monkeypatch.setattr(report_render.os, "open", track_open)
+    monkeypatch.setattr(report_render.os, "close", track_close)
+    monkeypatch.setattr(report_render.os, "fsync", fail)
+    monkeypatch.setattr(report_render.os, "unlink", fail)
+    with pytest.raises(OSError, match="simulated failure"):
+        report_render._atomic_write(tmp_path / "report.md", b"report", overwrite=False)
+    assert len(directory_fds) == 1
+    assert closed == directory_fds
+    assert not (tmp_path / "report.md").exists()
+
+
+def test_network_address_family_disambiguates_broadcasts() -> None:
+    privacy = report_collect._Privacy(True)
+    value = "20:10:aa:bb:cc:dd:ee:ff"
+    addresses = [
+        {"family": "IPv6", "address": value, "broadcast": value},
+        {"family": "MAC", "address": value, "broadcast": value},
+        {"family": "IPv4", "broadcast": "192.0.2.255"},
+    ]
+    result = report_collect._sanitize(addresses, privacy)
+    assert result[0]["address"] == result[0]["broadcast"] == "<ip-1>"
+    assert result[1]["address"] == result[1]["broadcast"] == "<mac-1>"
+    assert result[2]["broadcast"] == "<ip-2>"
+
+
+def test_fdopen_failure_closes_raw_descriptor_and_removes_temporary_file(tmp_path, monkeypatch) -> None:
+    destination = tmp_path / "diagnostic.md"
+    raw_descriptors: list[int] = []
+    close_attempts: list[int] = []
+    real_fdopen = os.fdopen
+    real_close = os.close
+
+    def fail_fdopen(fd: int, *_args, **_kwargs):
+        raw_descriptors.append(fd)
+        # Simulate fdopen constructing and then abandoning a wrapper before
+        # raising. closefd=False must leave the raw descriptor with its caller.
+        abandoned_stream = real_fdopen(fd, *_args, **_kwargs)
+        abandoned_stream.close()
+        os.fstat(fd)
+        raise OSError("simulated fdopen error")
+
+    def track_close(fd: int) -> None:
+        if raw_descriptors and fd == raw_descriptors[0]:
+            close_attempts.append(fd)
+        real_close(fd)
+
+    monkeypatch.setattr(report_render.os, "fdopen", fail_fdopen)
+    monkeypatch.setattr(report_render.os, "close", track_close)
+    with pytest.raises(OSError, match="simulated fdopen error"):
+        report_render._atomic_write(destination, b"report", overwrite=False)
+
+    assert len(raw_descriptors) == 1
+    assert close_attempts == raw_descriptors
+    assert not destination.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("failure", ["write", "flush", "fsync"])
+def test_stream_failure_closes_stream_then_owned_raw_descriptor_once_and_removes_temporary_file(
+    tmp_path, monkeypatch, failure: str,
+) -> None:
+    destination = tmp_path / "diagnostic.md"
+    raw_descriptors: list[int] = []
+    direct_close_attempts: list[int] = []
+    stream_closes: list[int] = []
+    real_fdopen = os.fdopen
+    real_close = os.close
+
+    class FailingStream:
+        def __init__(self, stream):
+            self.stream = stream
+            self.fd = stream.fileno()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            stream_closes.append(self.fd)
+            self.stream.close()
+
+        def write(self, payload: bytes) -> int:
+            if failure == "write":
+                raise OSError("simulated write error")
+            return self.stream.write(payload)
+
+        def flush(self) -> None:
+            if failure == "flush":
+                raise OSError("simulated flush error")
+            self.stream.flush()
+
+        def fileno(self) -> int:
+            return self.stream.fileno()
+
+    def tracked_fdopen(fd: int, *args, **kwargs):
+        raw_descriptors.append(fd)
+        return FailingStream(real_fdopen(fd, *args, **kwargs))
+
+    def track_close(fd: int) -> None:
+        if raw_descriptors and fd == raw_descriptors[0]:
+            direct_close_attempts.append(fd)
+        real_close(fd)
+
+    def fail_fsync(_fd: int) -> None:
+        raise OSError("simulated fsync error")
+
+    monkeypatch.setattr(report_render.os, "fdopen", tracked_fdopen)
+    monkeypatch.setattr(report_render.os, "close", track_close)
+    if failure == "fsync":
+        monkeypatch.setattr(report_render.os, "fsync", fail_fsync)
+
+    with pytest.raises(OSError, match=f"simulated {failure} error"):
+        report_render._atomic_write(destination, b"report", overwrite=False)
+
+    assert len(raw_descriptors) == 1
+    assert stream_closes == raw_descriptors
+    assert direct_close_attempts == raw_descriptors
     assert not destination.exists()
     assert list(tmp_path.iterdir()) == []
 

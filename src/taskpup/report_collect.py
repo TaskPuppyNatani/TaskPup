@@ -172,6 +172,7 @@ def _sanitize(value: Any, privacy: _Privacy, key: str = "") -> Any:
     if _SECRET_KEY.search(lowered):
         return "<redacted>"
     if isinstance(value, Mapping):
+        family = value.get("family")
         named_secret = any(
             str(k).lower() in {"name", "option", "parameter"}
             and isinstance(v, str)
@@ -182,7 +183,7 @@ def _sanitize(value: Any, privacy: _Privacy, key: str = "") -> Any:
             str(k): (
                 "<redacted>"
                 if named_secret and str(k).lower() in {"value", "setting", "current", "default"}
-                else _sanitize(v, privacy, str(k))
+                else _sanitize(v, privacy, "ip" if str(k).lower() in {"address", "broadcast"} and family in ("IPv4", "IPv6") else "mac" if str(k).lower() in {"address", "broadcast"} and family == "MAC" else str(k))
             )
             for k, v in value.items()
         }
@@ -240,7 +241,7 @@ def _sanitize(value: Any, privacy: _Privacy, key: str = "") -> Any:
         if lowered in {"device", "device_path"} and clean.startswith(("/sys/", "pci", "0000:")):
             return privacy.mask("hardware", clean)
         return clean
-    if lowered in {"ip", "ip_address", "ipv4", "ipv6", "gateway", "nameserver", "nameservers", "next_hop", "destination", "route_destination", "netmask", "broadcast"}:
+    if lowered in {"ip", "ip_address", "ipv4", "ipv6", "gateway", "nameserver", "nameservers", "next_hop", "destination", "route_destination", "netmask"}:
         try:
             candidate = clean.split("%", 1)[0]
             if "/" in candidate:
@@ -252,7 +253,7 @@ def _sanitize(value: Any, privacy: _Privacy, key: str = "") -> Any:
                 return privacy.mask("host", clean)
             return privacy.sanitize_text(clean)
         return privacy.mask("ip", clean)
-    if lowered in {"address", "network_address"}:
+    if lowered in {"address", "network_address", "broadcast"}:
         if re.fullmatch(r"(?i)(?:[0-9a-f]{2}[:-]){5,31}[0-9a-f]{2}", clean):
             return privacy.mask("mac", clean)
         try:
@@ -355,6 +356,8 @@ def _safe_mount_options(raw_options: str, privacy: _Privacy) -> list[dict[str, s
         elif normalized in _FSTAB_SAFE_OPTIONS:
             if normalized in {"uid", "gid"} and privacy.enabled:
                 clean_value = "<user>"
+            elif normalized == "user" and privacy.enabled:
+                clean_value = privacy.mask("user", value)
             elif normalized in {"subvol", "x-systemd.requires", "x-systemd.after", "x-systemd.before"} or (privacy.enabled and "/" in value):
                 clean_value = privacy.mask("mountroot", value) if privacy.enabled else _scrub_secrets(value)
             elif normalized in {"addr", "ip", "server"}:
