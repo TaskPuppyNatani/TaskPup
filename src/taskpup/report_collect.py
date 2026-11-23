@@ -413,7 +413,7 @@ def _app_version() -> str:
     try:
         return importlib.metadata.version("taskpup")
     except importlib.metadata.PackageNotFoundError:
-        return "0.1.0"
+        return "0.1.1"
 
 
 def _kernel_cmdline(privacy: _Privacy) -> list[dict[str, str]]:
