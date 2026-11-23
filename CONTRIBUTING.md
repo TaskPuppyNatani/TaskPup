@@ -27,7 +27,7 @@ QT_QPA_PLATFORM=xcb xvfb-run -a .venv/bin/python -m pytest
 
 ## AppImage packaging
 
-The AppImage workflow is experimental; an official AppImage release has not been published. Read the [packaging guide](packaging/appimage/README.md) before building. Release-mode builds require a clean checkout. Experimental builds capture and hash the source snapshot, including uncommitted and untracked inputs.
+The AppImage workflow remains experimental, while the official Linux x86_64 AppImage is available from the [GitHub Releases page](https://github.com/TaskPuppyNatani/TaskPup/releases). Read the [packaging guide](packaging/appimage/README.md) before building. Release-mode builds require a clean checkout. Experimental builds capture and hash the source snapshot, including uncommitted and untracked inputs.
 
 ## Project structure
 

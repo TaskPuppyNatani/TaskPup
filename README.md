@@ -48,7 +48,7 @@ On LMDE, install the distribution's `python3-venv` package if virtual-environmen
 
 ### AppImage
 
-AppImage packaging is available for evaluation, but **no official AppImage release has been published yet**. Do not download AppImages from unofficial locations. Build and provenance details are in the [AppImage packaging guide](packaging/appimage/README.md).
+Download the official Linux x86_64 AppImage from the [GitHub Releases page](https://github.com/TaskPuppyNatani/TaskPup/releases). See the release notes for installation and checksum verification. Build and provenance details are in the [AppImage packaging guide](packaging/appimage/README.md).
 
 ## Tested environments
 
@@ -70,5 +70,9 @@ TaskPup refuses to run as root and uses the desktop user's permissions. Process 
 ## Branding
 
 The logo above is the official [TaskPuppy Kreations artwork](assets/TaskPuppyLogo.png). AppImage and launcher packaging use a separate [launcher icon](assets/branding/appimage-icon.png); the original in-app logo remains unchanged.
+
+## License
+
+TaskPup is licensed under GNU GPL version 3. See [LICENSE](LICENSE).
 
 [![Total Downloads](https://img.shields.io/github/downloads/TaskPuppyNatani/TaskPup/total?label=Total%20Downloads&color=7bd94c)](https://github.com/TaskPuppyNatani/TaskPup/releases)

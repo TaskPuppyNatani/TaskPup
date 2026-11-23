@@ -3,6 +3,15 @@ from types import SimpleNamespace
 from taskpup import report_collect as reports
 
 
+def test_app_version_uses_project_version_fallback_when_uninstalled(monkeypatch) -> None:
+    def missing_distribution(_name: str) -> str:
+        raise reports.importlib.metadata.PackageNotFoundError("taskpup")
+
+    monkeypatch.setattr(reports.importlib.metadata, "version", missing_distribution)
+
+    assert reports._app_version() == "0.1.1"
+
+
 def test_fstab_structures_entries_and_redacts_credentials_and_private_identifiers() -> None:
     privacy = reports._Privacy(True)
     raw = (
