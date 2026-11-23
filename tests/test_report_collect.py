@@ -21,7 +21,7 @@ def test_fstab_structures_entries_and_redacts_credentials_and_private_identifier
     assert local["record_type"] == "entry"
     assert local["source"] == "<device-1>-partition-1"
     assert local["mountpoint"] == "<mount-1>"
-    assert {"name": "subvol", "value": "<home>/Work"} in local["options"]
+    assert {"name": "subvol", "value": "<mountroot-1>"} in local["options"]
     remote = entries[3]
     assert remote["source"] == "<source-1>"
     assert {"name": "credentials", "value": "<redacted>"} in remote["options"]
@@ -40,6 +40,15 @@ def test_device_and_filesystem_source_pseudonyms_are_stable_and_partition_aware(
 
     assert whole_disk["name"] == whole_disk["device_path"] == "<device-1>"
     assert partition["name"] == partition["source"] == "<device-1>-partition-1"
+
+
+def test_bind_sources_and_unknown_systemd_options_are_protected() -> None:
+    line = "/srv/customer-alice/private-share /mnt/archive none bind,x-systemd.custom=PRIVATE_MARKER 0 0"
+    protected = reports._parse_fstab(line, reports._Privacy(True))[0]
+    full = reports._parse_fstab(line, reports._Privacy(False))[0]
+    assert "/srv/customer-alice" not in repr(protected)
+    assert full["source"] == "/srv/customer-alice/private-share"
+    assert "PRIVATE_MARKER" not in repr(protected) and "PRIVATE_MARKER" not in repr(full)
 
 
 def test_generic_network_and_hardware_identifiers_are_redacted_consistently() -> None:
@@ -84,12 +93,17 @@ def test_kernel_command_line_omits_unknown_arguments_and_sanitizes_boot_paths() 
 
     assert {"parameter": "quiet", "value": "present"} in parsed
     assert {"parameter": "root", "value": "UUID=<uuid-1>"} in parsed
-    assert {"parameter": "BOOT_IMAGE", "value": "<home>/vmlinuz-1"} in parsed
+    assert {"parameter": "BOOT_IMAGE", "value": "<path-1>"} in parsed
     assert {"parameter": "root", "value": "PARTUUID=<uuid-2>"} in parsed
     assert {"parameter": "loglevel", "value": "3"} in parsed
     assert "password" not in repr(parsed)
     assert "hunter2" not in repr(parsed)
     assert "abc123" not in repr(parsed)
+
+
+def test_full_kernel_command_line_preserves_device_path() -> None:
+    parsed = reports._parse_kernel_cmdline("root=/dev/nvme2n1p2", reports._Privacy(False))
+    assert parsed == [{"parameter": "root", "value": "/dev/nvme2n1p2"}]
 
 
 def test_credentials_are_removed_even_when_privacy_is_disabled() -> None:

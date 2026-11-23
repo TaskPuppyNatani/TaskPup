@@ -52,9 +52,9 @@ The terminal launcher is the verified startup path on Cinnamon/X11. TaskPup supp
 
 ## Export a system report
 
-Choose **Export System Report…**, select the diagnostic sections and output format, then choose a destination. Collection and export run in the background. Privacy protection is enabled by default. Disabling it includes more identifiers. Always review a report before sharing: automated redaction cannot guarantee removal of every sensitive value. Passwords, tokens, private keys and credential-file contents are not intentionally collected.
+Choose **Export System Report…**, select the diagnostic sections and output format, then choose a destination. Collection and export run in the background. Privacy-Protected Diagnostics is the default. Full Diagnostics includes more identifiers and requires confirmation. Always review a report before sharing: automated redaction cannot guarantee removal of every sensitive value. Passwords, tokens, private keys and credential-file contents are not intentionally collected.
 
-Markdown, JSON Lines and standalone HTML use the same collected snapshot. **All formats** saves a ZIP with one file of each type. JSON Lines schema version 1 uses one JSON object per line with `schema_version`, `record_type`, `section`, `timestamp`, and `data`; records describe metadata, selected sections, and collection errors. Missing values are represented as null where applicable. Availability depends on the Linux interfaces and permissions of the desktop user.
+Markdown, formatted JSON, JSON Lines and standalone HTML use the same collected snapshot. **All formats** saves a ZIP with one file of each type. JSON contains the schema-versioned snapshot with metadata, selected sections, section data and errors. JSON Lines schema version 1 remains unchanged: one JSON object per line with `schema_version`, `record_type`, `section`, `timestamp`, and `data`; records describe metadata, selected sections, and collection errors. Missing values are represented as null where applicable. Availability depends on the Linux interfaces and permissions of the desktop user.
 
 ## Development checks
 

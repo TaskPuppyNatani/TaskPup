@@ -7,7 +7,7 @@ import zipfile
 
 import pytest
 
-from taskpup import report_render
+from taskpup import report_collect, report_render
 from taskpup.report_render import write_report
 
 
@@ -65,6 +65,45 @@ def test_jsonl_export_has_independently_parseable_schema_versioned_records(tmp_p
     }
     assert records[1]["data"]["distribution"] == "Test Linux"
     assert records[-1]["section"] == "Graphics"
+
+
+def test_formatted_json_preserves_snapshot_types_and_unicode(tmp_path) -> None:
+    data = snapshot()
+    data["sections"] = {"example": {"model": "Disque é", "size": 1000, "missing": None}}
+    destination = tmp_path / "diagnostic.json"
+    write_report(data, destination, "json")
+    raw = destination.read_text(encoding="utf-8")
+    assert "\n  \"schema_version\"" in raw and "Disque é" in raw
+    assert json.loads(raw) == data
+
+
+@pytest.mark.parametrize("protected", [True, False])
+def test_privacy_modes_are_consistent_across_all_exports(tmp_path, protected: bool) -> None:
+    privacy = report_collect._Privacy(protected)
+    raw = {
+        "devices": [{"device_path": "/dev/nvme2n1", "model": "Synthetic SSD", "capacity_bytes": 1024}],
+        "partitions": [{"device_path": "/dev/nvme2n1p2", "parent_device": "nvme2n1", "partition_number": 2}],
+        "mounts": [{"source": "/dev/nvme2n1p2", "mountpoint": "/media/private-name", "filesystem_type": "ext4"}],
+        "fstab": {"entries": report_collect._parse_fstab(
+            "/dev/nvme2n1p2 /media/private-name ext4 subvol=/private/team,credentials=/tmp/secret-file,password=fixture-secret 0 2", privacy)},
+    }
+    data = snapshot()
+    data["privacy"] = protected
+    data["sections"] = {"storage": report_collect._sanitize(raw, privacy)}
+    destination = tmp_path / "reports.zip"
+    write_report(data, destination, "zip")
+    with zipfile.ZipFile(destination) as archive:
+        texts = [archive.read(name).decode("utf-8") for name in archive.namelist()]
+        assert json.loads(archive.read("report.json")) == data
+        assert all(json.loads(line) for line in archive.read("report.jsonl").decode().splitlines())
+    for text in texts:
+        assert "fixture-secret" not in text and "/tmp/secret-file" not in text
+        if protected:
+            assert "/dev/nvme2n1" not in text and "/media/private-name" not in text and "/private/team" not in text
+        else:
+            assert "/dev/nvme2n1" in text and "/media/private-name" in text
+    if protected:
+        assert "Device 1, Partition 2" in texts[0] and "Synthetic SSD" in texts[0]
 
 
 def test_byte_formatting_uses_binary_units_and_handles_boundaries() -> None:
@@ -148,13 +187,14 @@ def test_internal_section_names_are_displayed_as_readable_labels() -> None:
     assert "<td>Model Name</td><td>Example CPU</td>" in html
 
 
-def test_zip_contains_exactly_three_reports_rendered_from_same_snapshot(tmp_path) -> None:
+def test_zip_contains_all_reports_rendered_from_same_snapshot(tmp_path) -> None:
     destination = tmp_path / "diagnostic.zip"
 
     write_report(snapshot(), destination, "zip")
 
     with zipfile.ZipFile(destination) as archive:
-        assert archive.namelist() == ["report.md", "report.jsonl", "report.html"]
+        assert archive.namelist() == ["report.md", "report.json", "report.jsonl", "report.html"]
+        assert json.loads(archive.read("report.json")) == snapshot()
         assert archive.testzip() is None
         markdown = archive.read("report.md").decode("utf-8")
         records = [
@@ -545,13 +585,13 @@ def test_markdown_overview_structured_sections_numeric_precision_and_no_data_los
 
     # Storage separated from partitions
     assert "### Physical Storage Devices" in md
-    assert "| &lt;device-1&gt; | Samsung 990 PRO | NVMe SSD | 2.00 TiB | 41.2 °C | Yes |" in md or "| &lt;device-1&gt; | Samsung 990 PRO | NVMe SSD | 2.00 TiB | 41.3 °C | Yes |" in md
+    assert "| Device 1 | Samsung 990 PRO | NVMe SSD | 2.00 TiB | 41.2 °C | Yes |" in md or "| Device 1 | Samsung 990 PRO | NVMe SSD | 2.00 TiB | 41.3 °C | Yes |" in md
     assert "### Partitions" in md
-    assert "| &lt;device-1&gt;-partition-2 | &lt;device-1&gt; | 2 | 1.00 TiB |" in md
+    assert "| Device 1, Partition 2 | Device 1 | 2 | 1.00 TiB |" in md
 
     # Filesystems: capacity separated from virtual mounts and options without Name:/Value: repetition
     assert "### Mounted Volumes" in md
-    assert "| &lt;mount-1&gt; | ext4 | &lt;device-1&gt;-partition-2 | 21.84 GiB / 43.99 GiB | 19.89 GiB | 49.6% |" in md
+    assert "| &lt;mount-1&gt; | ext4 | Device 1, Partition 2 | 21.84 GiB / 43.99 GiB | 19.89 GiB | 49.6% |" in md
     assert "### System and Virtual Mounts" in md
     assert "| &lt;mount-2&gt; | tmpfs | tmpfs |" in md
     assert "### Mount Options and Identifiers" in md

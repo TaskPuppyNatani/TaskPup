@@ -235,6 +235,8 @@ def _sanitize(value: Any, privacy: _Privacy, key: str = "") -> Any:
             return privacy.mask("source", clean)
         if lowered == "source" and clean.startswith(("/sys/", "pci", "0000:")):
             return privacy.mask("hardware", clean)
+        if lowered in {"source", "filesystem_source"} and clean.startswith("/"):
+            return privacy.mask("source", clean)
         if lowered in {"device", "device_path"} and clean.startswith(("/sys/", "pci", "0000:")):
             return privacy.mask("hardware", clean)
         return clean
@@ -281,7 +283,9 @@ def _parse_kernel_cmdline(raw: str, privacy: _Privacy) -> list[dict[str, Any]]:
         elif name in _CMDLINE_SAFE_VALUES and separator:
             if name == "root" or name == "BOOT_IMAGE":
                 # Kernel paths and root identifiers can reveal mounted devices.
-                safe_value = privacy.block_device(value.removeprefix("/dev/")) if value.startswith("/dev/") else _scrub_secrets(value)
+                safe_value = privacy.block_device(value) if value.startswith("/dev/") else _scrub_secrets(value)
+                if privacy.enabled and value.startswith("/") and not value.startswith("/dev/"):
+                    safe_value = privacy.mask("path", value)
                 for prefix in ("PARTUUID=", "UUID="):
                     if privacy.enabled and value.upper().startswith(prefix):
                         safe_value = prefix + privacy.mask("uuid", value[len(prefix):])
@@ -346,13 +350,13 @@ def _safe_mount_options(raw_options: str, privacy: _Privacy) -> list[dict[str, s
             safe.append({"name": name, "value": "<redacted>"})
         elif not separator:
             # Keep familiar flags; omit arbitrary words that could be pasted secrets.
-            if normalized in _FSTAB_SAFE_OPTIONS or normalized.startswith("x-systemd."):
+            if normalized in _FSTAB_SAFE_OPTIONS:
                 safe.append({"name": name})
-        elif normalized in _FSTAB_SAFE_OPTIONS or normalized.startswith("x-systemd."):
+        elif normalized in _FSTAB_SAFE_OPTIONS:
             if normalized in {"uid", "gid"} and privacy.enabled:
                 clean_value = "<user>"
-            elif normalized in {"subvol", "x-systemd.requires", "x-systemd.after", "x-systemd.before"}:
-                clean_value = privacy.sanitize_text(value)
+            elif normalized in {"subvol", "x-systemd.requires", "x-systemd.after", "x-systemd.before"} or (privacy.enabled and "/" in value):
+                clean_value = privacy.mask("mountroot", value) if privacy.enabled else _scrub_secrets(value)
             elif normalized in {"addr", "ip", "server"}:
                 clean_value = privacy.mask("ip", value) if privacy.enabled else _scrub_secrets(value)
             elif re.fullmatch(r"[A-Za-z0-9_.:+/@%,-]{1,160}", value):

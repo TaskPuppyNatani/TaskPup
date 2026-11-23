@@ -74,3 +74,24 @@ def test_dialog_reports_export_failure(qt_app, tmp_path, monkeypatch):
         assert "fixture failure" in messages[0]
     finally:
         dialog.close()
+
+
+def test_full_diagnostics_requires_confirmation(qt_app, monkeypatch):
+    calls = []
+    monkeypatch.setattr(QMessageBox, "question", lambda *args: calls.append(args) or QMessageBox.StandardButton.No)
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("save dialog opened")))
+    dialog = ReportDialog()
+    try:
+        assert dialog.privacy.isChecked()
+        assert "JSON (.json)" in [dialog.format.itemText(i) for i in range(dialog.format.count())]
+        dialog.privacy.setChecked(False)
+        dialog.start_export()
+        assert len(calls) == 1 and "Full diagnostics may include usernames" in calls[0][2]
+        assert dialog.future is None
+        monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.StandardButton.Yes)
+        save_calls = []
+        monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **kw: (save_calls.append(True) or "", ""))
+        dialog.start_export()
+        assert save_calls == [True] and dialog.future is None
+    finally:
+        dialog.close()
